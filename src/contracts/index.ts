@@ -1373,6 +1373,17 @@ export type StartTaskRequest = {
   readonly modelRole: "main-coder";
 };
 
+export type StartBenchmarkSessionRequest = {
+  readonly projectId: ProjectId;
+  readonly workspaceId: WorkspaceId;
+  readonly objective: string;
+  readonly harnessId: HarnessId;
+  readonly route: ModelRouteSignature;
+  readonly policyProfile: AutonomyProfile;
+  readonly capabilityEnvelope: CapabilityEnvelope;
+  readonly credentialEnvNames: readonly CredentialEnvName[];
+};
+
 export type ResumeThreadRequest = {
   readonly sourceSessionId: SessionId;
   readonly workspaceId: WorkspaceId;
@@ -1531,6 +1542,8 @@ export interface ExecutionPolicy {
 
 export interface SessionService {
   startTask(request: StartTaskRequest): Promise<Result<SessionRecord, SessionError | HarnessError | ModelError>>;
+  /** Starts an isolated benchmark session without changing the project's active harness pointer. */
+  startBenchmarkTask(request: StartBenchmarkSessionRequest): Promise<Result<SessionRecord, SessionError | HarnessError | ModelError>>;
   resumeThread(request: ResumeThreadRequest): Promise<Result<SessionRecord, SessionError | HarnessError>>;
   spawnChild(request: SpawnChildRequest): Promise<Result<ChildSessionRecord, SessionError | HarnessError>>;
   complete(sessionId: SessionId, outcome: SessionOutcome): Promise<Result<SessionRecord, SessionError>>;

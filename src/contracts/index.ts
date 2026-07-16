@@ -1496,7 +1496,7 @@ export interface SessionRepository {
   create(header: SessionHeader): Promise<Result<SessionRecord, SessionError>>;
   get(id: SessionId): Promise<Result<SessionRecord, SessionError>>;
   list(projectId: ProjectId, page: PageRequest): Promise<Result<Page<SessionRecord>, SessionError>>;
-  append(id: SessionId, expectedSequence: number, payload: PersistedEventPayload, harnessId: HarnessId): Promise<Result<SessionEvent, SessionError>>;
+  append(id: SessionId, expectedSequence: number, payload: PersistedEventPayload, harnessId: HarnessId, reservedEventId: EventId | null): Promise<Result<SessionEvent, SessionError>>;
   read(id: SessionId, afterSequence: number, limit: number): Promise<Result<readonly SessionEvent[], SessionError>>;
   recordArtifact(record: ArtifactRecord): Promise<Result<ArtifactRecord, SessionError>>;
   readArtifact(id: ArtifactId, offset: ByteCount, limit: ByteCount): Promise<Result<ArtifactSlice, SessionError>>;

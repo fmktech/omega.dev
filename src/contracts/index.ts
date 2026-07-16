@@ -1497,6 +1497,8 @@ export interface ObjectStore {
 
 export interface ProjectRepository {
   registerWorkspace(path: AbsolutePath): Promise<Result<{ readonly project: ProjectRecord; readonly workspace: WorkspaceRecord }, StoreError>>;
+  /** Trusted benchmark-only attachment; preserves the existing project's repository identity. */
+  registerBenchmarkWorkspace(projectId: ProjectId, path: AbsolutePath, fixtureHash: ObjectHash): Promise<Result<WorkspaceRecord, StoreError>>;
   getProject(id: ProjectId): Promise<Result<ProjectRecord, StoreError>>;
   getWorkspace(id: WorkspaceId): Promise<Result<WorkspaceRecord, StoreError>>;
   listProjects(page: PageRequest): Promise<Result<Page<ProjectRecord>, StoreError>>;

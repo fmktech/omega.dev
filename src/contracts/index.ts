@@ -619,6 +619,7 @@ export type FileReadResult = {
 };
 
 export type FileWriteRequest = {
+  readonly sessionId: SessionId;
   readonly workspaceId: WorkspaceId;
   readonly path: RelativePath;
   /** Null means create only if the path does not exist. */

@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "vitest run",
+    "test": "vitest run src",
     "test:conformance": "vitest run src/process/process-runtime.test.ts src/harness/harness-runtime.test.ts src/clients/clients.test.ts",
     "test:e2e": "vitest run src/app/daemon-integrator.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

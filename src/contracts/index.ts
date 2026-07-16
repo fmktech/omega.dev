@@ -1600,6 +1600,7 @@ export interface OmegaClient {
 export interface OmegaApplication {
   execute(request: ClientRequest): Promise<ClientResponse>;
   events(sessionId: SessionId, afterSequence: number): AsyncIterable<LiveEventEnvelope>;
+  recordDiagnostic(input: { readonly boundary: "application" | "http" | "sse"; readonly message: string; readonly stack: string | null; readonly at: Timestamp }): Promise<Result<ArtifactId, IoError>>;
   start(): Promise<Result<void, InternalError | IoError | ValidationError>>;
   stop(deadline: Timestamp): Promise<Result<void, InternalError | IoError>>;
 }

@@ -350,6 +350,12 @@ export type ProviderConfig = {
   readonly credentialEnvName: CredentialEnvName | null;
 };
 
+export type ModelListPrice = {
+  readonly inputUsdMicrosPerMillionTokens: UsdMicros;
+  readonly cachedInputUsdMicrosPerMillionTokens: UsdMicros;
+  readonly outputUsdMicrosPerMillionTokens: UsdMicros;
+};
+
 export type ModelRoleRoute = {
   readonly role: ModelRole;
   readonly providerId: string;
@@ -363,8 +369,11 @@ export type ModelRoleRoute = {
   readonly topP: number | null;
   /** Null means deterministic seeding is unavailable or intentionally disabled. */
   readonly seed: number | null;
+  readonly contextLimit: TokenCount;
   readonly maxOutputTokens: TokenCount;
   readonly timeoutMs: DurationMs;
+  /** Frozen comparison price; provider charge remains separately reported by ModelUsage. */
+  readonly equivalentListPrice: ModelListPrice;
 };
 
 export type BenchmarkBudget = {
@@ -643,6 +652,7 @@ export type ModelRouteSignature = {
   readonly seed: number | null;
   readonly contextLimit: TokenCount;
   readonly outputLimit: TokenCount;
+  readonly equivalentListPrice: ModelListPrice;
 };
 
 export type ModelTextPart = { readonly kind: "text"; readonly text: string };

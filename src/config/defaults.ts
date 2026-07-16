@@ -16,6 +16,12 @@ import type {
   UsdMicros,
 } from "../contracts/index.js";
 
+const NEMOTRON_3_ULTRA_LIST_PRICE = {
+  inputUsdMicrosPerMillionTokens: 500_000 as UsdMicros,
+  cachedInputUsdMicrosPerMillionTokens: 100_000 as UsdMicros,
+  outputUsdMicrosPerMillionTokens: 2_200_000 as UsdMicros,
+} as const;
+
 export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
   schemaVersion: 1,
   homeDirectory: {
@@ -101,8 +107,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: null,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 32_768 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
       {
         role: "fast-policy",
@@ -121,8 +129,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: 0,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 1_024 as TokenCount,
         timeoutMs: 30_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
       {
         role: "harness-mutator",
@@ -141,8 +151,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: null,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 32_768 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
       {
         role: "promotion-evaluator",
@@ -161,8 +173,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: 0,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 16_384 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
       {
         role: "diagnostician",
@@ -181,8 +195,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: null,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 16_384 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
       {
         role: "crystallizer",
@@ -201,8 +217,10 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         temperature: null,
         topP: null,
         seed: null,
+        contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 16_384 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
+        equivalentListPrice: NEMOTRON_3_ULTRA_LIST_PRICE,
       },
     ],
   },

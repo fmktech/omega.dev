@@ -92,8 +92,13 @@ describe("execution policy", () => {
       ruleId: "capability:write-files",
     });
 
+    const sourceOnlyWrites = envelope({
+      grants: envelope().grants.map((grant) => grant.kind === "write-files"
+        ? { kind: "write-files" as const, pathPrefixes: ["src" as RelativePath] }
+        : grant),
+    });
     expect(
-      decision(await policy.evaluate(evaluation(fileWriteFacts("secrets/token"), envelope(), "guarded"))),
+      decision(await policy.evaluate(evaluation(fileWriteFacts("secrets/token"), sourceOnlyWrites, "guarded"))),
     ).toMatchObject({ outcome: "deny", ruleId: "capability:write-files" });
     expect(
       decision(
@@ -215,7 +220,8 @@ function envelope(
 ): CapabilityEnvelope {
   return {
     grants: [
-      { kind: "write-files", pathPrefixes: ["src" as RelativePath] },
+      { kind: "read-files", pathPrefixes: ["." as RelativePath] },
+      { kind: "write-files", pathPrefixes: ["." as RelativePath] },
       { kind: "start-process", executableNames: [] },
       { kind: "process-input" },
       { kind: "network-egress", allowedHosts: ["api.example.com"] },

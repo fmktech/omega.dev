@@ -18,6 +18,7 @@ export const createHarnessActivationService: CreateHarnessActivationService = (p
     activationReason: HarnessUpdate["reason"],
     scorecardId: ScorecardId | null,
     requireAncestor: boolean,
+    commitGuard?: () => boolean,
   ): Promise<Result<HarnessUpdate, HarnessError>> => {
     const current = await harnesses.getActiveHarness(projectId);
     if (!current.ok) {
@@ -42,7 +43,12 @@ export const createHarnessActivationService: CreateHarnessActivationService = (p
         return validation("Rollback target must be an ancestor of the active harness", "target");
       }
     }
-    const advanced = await projects.compareAndSetActiveHarness(projectId, current.value.id, candidate.value.id);
+    const advanced = await projects.compareAndSetActiveHarness(
+      projectId,
+      current.value.id,
+      candidate.value.id,
+      commitGuard,
+    );
     if (!advanced.ok) {
       return advanced;
     }
@@ -60,7 +66,7 @@ export const createHarnessActivationService: CreateHarnessActivationService = (p
   };
 
   const service: HarnessActivationService = {
-    async promote(scorecard) {
+    async promote(scorecard, commitGuard) {
       const incumbent = await harnesses.getHarness(scorecard.incumbentHarnessId);
       if (!incumbent.ok) {
         return incumbent;
@@ -92,7 +98,7 @@ export const createHarnessActivationService: CreateHarnessActivationService = (p
           },
         };
       }
-      return activate(scorecard.projectId, candidate.value.id, "promotion", scorecard.id, false);
+      return activate(scorecard.projectId, candidate.value.id, "promotion", scorecard.id, false, commitGuard);
     },
 
     async pin(projectId, target, reason) {

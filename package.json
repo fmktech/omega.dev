@@ -8,12 +8,18 @@
     "url": "git+https://github.com/fmktech/omega.dev.git"
   },
   "type": "module",
+  "bin": {
+    "omega": "dist/cli-main.js"
+  },
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=24.12.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "cli": "node dist/cli-main.js",
+    "start": "node dist/main.js",
+    "sandbox:image": "sh scripts/build-sandbox-image.sh",
     "test": "vitest run src",
     "test:conformance": "vitest run src/process/process-runtime.test.ts src/harness/harness-runtime.test.ts src/clients/clients.test.ts",
     "test:e2e": "vitest run src/app/daemon-integrator.test.ts",

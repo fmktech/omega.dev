@@ -260,7 +260,7 @@ export const createFileProjectRepository: CreateFileProjectRepository = (root, o
     }
   },
 
-  async compareAndSetActiveHarness(projectId, expected, next) {
+  async compareAndSetActiveHarness(projectId, expected, next, commitGuard) {
     const path = projectRecordPath(root, projectId);
     try {
       return await withFileLock(path, async () => {
@@ -285,9 +285,35 @@ export const createFileProjectRepository: CreateFileProjectRepository = (root, o
           };
         }
         const updated: ProjectRecord = { ...loaded.value, activeHarnessId: next, updatedAt: timestampNow() };
+        if (commitGuard !== undefined && !commitGuard()) {
+          return {
+            ok: false,
+            error: {
+              kind: "conflict",
+              resource: "activation-commit-guard",
+              expected: "active",
+              actual: "cancelled",
+              recoverable: true,
+              callerAction: "refresh-version-and-retry",
+            },
+          };
+        }
         const stored = await persistSnapshot(objects, updated);
         if (!stored.ok) {
           return stored;
+        }
+        if (commitGuard !== undefined && !commitGuard()) {
+          return {
+            ok: false,
+            error: {
+              kind: "conflict",
+              resource: "activation-commit-guard",
+              expected: "active",
+              actual: "cancelled",
+              recoverable: true,
+              callerAction: "refresh-version-and-retry",
+            },
+          };
         }
         await atomicWriteFile(path, `${JSON.stringify(updated)}\n`);
         return { ok: true, value: updated };

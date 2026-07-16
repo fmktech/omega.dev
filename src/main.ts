@@ -18,7 +18,7 @@ export async function startDaemon(
   const application = createOmegaApplication(config, environment);
   const started = await application.start();
   if (!started.ok) return { ok: false, error: new Error(`Omega application failed to start: ${started.error.kind}`) };
-  const listener = await startHttpServer(application, config.server);
+  const listener = await startHttpServer(application, config.server, environment);
   if (!listener.ok) {
     const deadline = new Date(Date.now() + Number(config.processes.gracefulShutdownMs)).toISOString() as Timestamp;
     await application.stop(deadline);

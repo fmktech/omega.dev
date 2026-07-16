@@ -127,6 +127,7 @@ class OciSandboxBackend implements SandboxBackend {
       "--ulimit",
       `cpu=${Math.max(1, Math.ceil(Number(spec.sandbox.cpuTimeLimitMs) / 1_000))}`,
     ];
+    if (spec.stdin === "pipe") args.push("--interactive");
     if (spec.sandbox.network === "none") args.push("--network", "none");
     for (const name of spec.credentialEnvNames) args.push("--env", String(name));
     args.push(spec.sandbox.runtime.image, spec.executable, ...spec.args);

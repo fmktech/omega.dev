@@ -3,8 +3,11 @@ import { join } from "node:path";
 
 import type {
   CapabilityEnvelope,
+  ComponentManifest,
   CreateMarketplaceService,
+  HarnessError,
   HarnessId,
+  HarnessManifest,
   KnowledgeError,
   MarketplaceArtifact,
   MarketplaceArtifactId,
@@ -36,7 +39,8 @@ import {
   writeJsonState,
 } from "./artifact-state.js";
 
-export const createMarketplaceService: CreateMarketplaceService = (root, objects) => {
+export const createMarketplaceService: CreateMarketplaceService = (options) => {
+  const { root, objects, harnesses, activation } = options;
   const marketplaceRoot = join(root, "marketplace");
   const artifactsRoot = join(marketplaceRoot, "artifacts");
   const installationsRoot = join(marketplaceRoot, "installations");
@@ -160,25 +164,50 @@ export const createMarketplaceService: CreateMarketplaceService = (root, objects
           if (existing.value.projectId !== projectId || existing.value.artifactId !== artifactId) {
             return { ok: false, error: ioError("validate marketplace installation key", new Error("Installation state key mismatch")) };
           }
-          return existing;
+          if (existing.value.activation !== "active") return existing;
+          const active = await harnesses.getActiveHarness(projectId);
+          if (active.ok && active.value.id === existing.value.candidateHarnessId) return existing;
+          const inactive: MarketplaceInstallation = {
+            ...existing.value,
+            activation: "installed-inactive",
+            activatedAt: null,
+          };
+          const persisted = await writeJsonState(path, inactive);
+          return persisted.ok ? { ok: true, value: inactive } : persisted;
         }
         if (existing.error.kind !== "not-found") {
           return existing;
         }
 
+        const incumbent = await harnesses.getActiveHarness(projectId);
+        if (!incumbent.ok) return { ok: false, error: asKnowledgeError(incumbent.error) };
+        const source = await harnesses.getHarness(artifact.value.sourceHarnessId);
+        if (!source.ok) return { ok: false, error: asKnowledgeError(source.error) };
+        const selected = selectMarketplaceComponents(source.value, artifact.value);
+        if (!selected.ok) return selected;
+        const candidate = candidateHarness(incumbent.value, artifact.value, selected.value);
+        const storedCandidate = await harnesses.putHarness(candidate);
+        if (!storedCandidate.ok) return { ok: false, error: asKnowledgeError(storedCandidate.error) };
+
         const requiresCanary = artifact.value.state === "experimental";
         const installedAt = nowTimestamp();
+        let isActive = false;
+        if (!requiresCanary) {
+          const activated = await activateCandidate(projectId, storedCandidate.value.id, artifactId, harnesses, activation);
+          if (!activated.ok) return activated;
+          isActive = true;
+        }
         const installation: MarketplaceInstallation = {
           artifactId,
           projectId,
-          installedComponentIds: artifact.value.kind === "harness" ? [] : artifact.value.componentIds,
-          candidateHarnessId: candidateHarnessId(projectId, artifact.value),
+          installedComponentIds: selected.value.map((component) => component.id),
+          candidateHarnessId: storedCandidate.value.id,
           compatibility: compatibility.value,
           requiresCanary,
-          activation: requiresCanary ? "installed-inactive" : "active",
+          activation: isActive ? "active" : "installed-inactive",
           canary: null,
           installedAt,
-          activatedAt: requiresCanary ? null : installedAt,
+          activatedAt: isActive ? installedAt : null,
         };
         const persisted = await writeJsonState(path, installation);
         if (!persisted.ok) {
@@ -229,8 +258,17 @@ export const createMarketplaceService: CreateMarketplaceService = (root, objects
           };
         }
         if (installed.value.activation === "active") {
-          return installed;
+          const active = await harnesses.getActiveHarness(evidence.projectId);
+          if (active.ok && active.value.id === installed.value.candidateHarnessId) return installed;
         }
+        const activatedCandidate = await activateCandidate(
+          evidence.projectId,
+          installed.value.candidateHarnessId,
+          evidence.artifactId,
+          harnesses,
+          activation,
+        );
+        if (!activatedCandidate.ok) return activatedCandidate;
         const activated: MarketplaceInstallation = {
           ...installed.value,
           activation: "active",
@@ -362,8 +400,91 @@ function matchesMarketplaceQuery(artifact: MarketplaceArtifact, query: Marketpla
     .includes(text);
 }
 
-function candidateHarnessId(projectId: ProjectId, artifact: MarketplaceArtifact): HarnessId {
-  return `candidate-${sha256(`${projectId}\u0000${artifact.id}\u0000${artifact.objectHash}`).slice(0, 48)}` as HarnessId;
+function selectMarketplaceComponents(
+  source: HarnessManifest,
+  artifact: MarketplaceArtifact,
+): Result<readonly ComponentManifest[], KnowledgeError> {
+  if (source.id !== artifact.sourceHarnessId || source.projectId !== artifact.sourceProjectId) {
+    return { ok: false, error: validationError("Marketplace source harness provenance does not match the artifact", "sourceHarnessId") };
+  }
+  if (artifact.componentIds.length === 0) {
+    return { ok: false, error: validationError("Marketplace installation must select at least one source component", "componentIds") };
+  }
+  const byId = new Map(source.components.map((component) => [component.id, component] as const));
+  const selected: ComponentManifest[] = [];
+  for (const id of artifact.componentIds) {
+    const component = byId.get(id);
+    if (component === undefined) {
+      return { ok: false, error: validationError("Marketplace component is absent from its source harness", "componentIds") };
+    }
+    selected.push(component);
+  }
+  return { ok: true, value: selected };
+}
+
+function candidateHarness(
+  incumbent: HarnessManifest,
+  artifact: MarketplaceArtifact,
+  selected: readonly ComponentManifest[],
+): HarnessManifest {
+  const selectedIds = new Set(selected.map((component) => component.id));
+  const replacesRunner = selected.some((component) => component.kind === "runner");
+  const components = [
+    ...incumbent.components.filter((component) => !selectedIds.has(component.id) && !(replacesRunner && component.kind === "runner")),
+    ...selected,
+  ];
+  const body = {
+    projectId: incumbent.projectId,
+    alias: `${incumbent.alias}+marketplace:${artifact.id}`,
+    parents: [incumbent.id],
+    components,
+    sourceArtifacts: [...incumbent.sourceArtifacts],
+    // Artifact publication is immutable, making retries produce one candidate.
+    createdAt: artifact.publishedAt,
+  } as const;
+  return { id: `harness_${sha256(encodeCanonical(body))}` as HarnessId, ...body };
+}
+
+async function activateCandidate(
+  projectId: ProjectId,
+  candidateId: HarnessId,
+  artifactId: MarketplaceArtifactId,
+  harnesses: Parameters<CreateMarketplaceService>[0]["harnesses"],
+  activation: Parameters<CreateMarketplaceService>[0]["activation"],
+): Promise<Result<void, KnowledgeError>> {
+  const current = await harnesses.getActiveHarness(projectId);
+  if (!current.ok) return { ok: false, error: asKnowledgeError(current.error) };
+  if (current.value.id !== candidateId) {
+    const candidate = await harnesses.getHarness(candidateId);
+    if (!candidate.ok) return { ok: false, error: asKnowledgeError(candidate.error) };
+    if (!candidate.value.parents.includes(current.value.id)) {
+      return { ok: false, error: conflictError("project-active-harness", candidate.value.parents[0] ?? candidateId, current.value.id) };
+    }
+    const pinned = await activation.pin(projectId, candidateId, `Installed trusted marketplace artifact ${artifactId}`);
+    if (!pinned.ok) return { ok: false, error: asKnowledgeError(pinned.error) };
+  }
+  const active = await harnesses.getActiveHarness(projectId);
+  if (!active.ok) return { ok: false, error: asKnowledgeError(active.error) };
+  return active.value.id === candidateId
+    ? { ok: true, value: undefined }
+    : { ok: false, error: conflictError("project-active-harness", candidateId, active.value.id) };
+}
+
+function asKnowledgeError(error: HarnessError): KnowledgeError {
+  if (error.kind === "harness-version-mismatch") {
+    return validationError("Harness activation raced with another project update", "candidateHarnessId");
+  }
+  if (error.kind === "protocol-error") {
+    return validationError(error.message, "harness");
+  }
+  return error;
+}
+
+function encodeCanonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(encodeCanonical).join(",")}]`;
+  const record = value as Readonly<Record<string, unknown>>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${encodeCanonical(record[key] ?? null)}`).join(",")}}`;
 }
 
 function artifactPath(root: string, id: MarketplaceArtifactId): string {

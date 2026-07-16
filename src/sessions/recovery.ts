@@ -31,17 +31,36 @@ export async function recoverExistingSession(
   if (!previous.ok) return previous;
   const alreadyRecovered = previous.value.find((event) => event.payload.kind === "session.recovered"
     && sameProcessIds(event.payload.interruptedProcessIds, interruptedProcessIds));
-  if (alreadyRecovered !== undefined) return repository.get(sessionId);
+  const harnessId = currentHarness(previous.value, current.value.header.initialHarnessId);
+  if (alreadyRecovered === undefined) {
+    const appended = await repository.append(
+      sessionId,
+      current.value.lastSequence,
+      { kind: "session.recovered", interruptedProcessIds: [...interruptedProcessIds] },
+      harnessId,
+      null,
+    );
+    if (!appended.ok) {
+      const raced = await repository.get(sessionId);
+      return raced.ok && raced.value.outcome !== null ? raced : appended;
+    }
+    publish({ kind: "session-event", sessionId, event: appended.value });
+  }
 
-  const appended = await repository.append(
+  const recovered = await repository.get(sessionId);
+  if (!recovered.ok || recovered.value.outcome !== null) return recovered;
+  const completed = await repository.append(
     sessionId,
-    current.value.lastSequence,
-    { kind: "session.recovered", interruptedProcessIds: [...interruptedProcessIds] },
-    currentHarness(previous.value, current.value.header.initialHarnessId),
+    recovered.value.lastSequence,
+    { kind: "session.completed", outcome: "failed" },
+    harnessId,
     null,
   );
-  if (!appended.ok) return appended;
-  publish({ kind: "session-event", sessionId, event: appended.value });
+  if (!completed.ok) {
+    const raced = await repository.get(sessionId);
+    return raced.ok && raced.value.outcome !== null ? raced : completed;
+  }
+  publish({ kind: "session-event", sessionId, event: completed.value });
   return repository.get(sessionId);
 }
 

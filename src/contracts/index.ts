@@ -1269,7 +1269,7 @@ export type BenchmarkExecutionEvidence = {
 
 /** Trusted integrator seam that materializes isolated fixtures and runs hidden verifiers. */
 export interface BenchmarkRunLauncher {
-  execute(request: BenchmarkExecutionRequest): Promise<Result<BenchmarkExecutionEvidence, EvolutionError>>;
+  execute(request: BenchmarkExecutionRequest, signal?: AbortSignal): Promise<Result<BenchmarkExecutionEvidence, EvolutionError>>;
 }
 
 export type PairInvalidReason =
@@ -1502,7 +1502,7 @@ export interface ProjectRepository {
   getProject(id: ProjectId): Promise<Result<ProjectRecord, StoreError>>;
   getWorkspace(id: WorkspaceId): Promise<Result<WorkspaceRecord, StoreError>>;
   listProjects(page: PageRequest): Promise<Result<Page<ProjectRecord>, StoreError>>;
-  compareAndSetActiveHarness(projectId: ProjectId, expected: HarnessId | null, next: HarnessId): Promise<Result<ProjectRecord, StoreError>>;
+  compareAndSetActiveHarness(projectId: ProjectId, expected: HarnessId | null, next: HarnessId, commitGuard?: () => boolean): Promise<Result<ProjectRecord, StoreError>>;
 }
 
 export interface SessionRepository {
@@ -1549,8 +1549,12 @@ export interface SessionService {
   resumeThread(request: ResumeThreadRequest): Promise<Result<SessionRecord, SessionError | HarnessError>>;
   spawnChild(request: SpawnChildRequest): Promise<Result<ChildSessionRecord, SessionError | HarnessError>>;
   complete(sessionId: SessionId, outcome: SessionOutcome): Promise<Result<SessionRecord, SessionError>>;
+  /** Completes a session at the runner protocol boundary without stopping the runner before its reply is delivered. */
+  completeFromRunner(sessionId: SessionId, outcome: SessionOutcome): Promise<Result<SessionRecord, SessionError>>;
   cancel(sessionId: SessionId, reason: string): Promise<Result<SessionRecord, SessionError | ProcessError>>;
   createHandoff(sessionId: SessionId): Promise<Result<HandoffRecord, SessionError>>;
+  recordRunnerEvent(sessionId: SessionId, payload: PersistedEventPayload, harnessId: HarnessId): Promise<Result<SessionEvent, SessionError>>;
+  publishRunnerEvent(event: LiveEventEnvelope): void;
   subscribe(sessionId: SessionId, afterSequence: number): AsyncIterable<LiveEventEnvelope>;
 }
 
@@ -1569,8 +1573,14 @@ export interface RunnerHost {
   stop(sessionId: SessionId, reason: string): Promise<Result<ProcessCompletion, HarnessError | ProcessError>>;
 }
 
+/** Daemon-owned pump that consumes each launched runner's request stream exactly once. */
+export interface RunnerProtocolDispatcher {
+  start(sessionId: SessionId): void;
+  stop(sessionId: SessionId): Promise<void>;
+}
+
 export interface HarnessActivationService {
-  promote(scorecard: PromotableScorecard): Promise<Result<HarnessUpdate, HarnessError>>;
+  promote(scorecard: PromotableScorecard, commitGuard?: () => boolean): Promise<Result<HarnessUpdate, HarnessError>>;
   pin(projectId: ProjectId, target: HarnessId, reason: string): Promise<Result<HarnessUpdate, HarnessError>>;
   rollback(projectId: ProjectId, target: HarnessId, reason: string): Promise<Result<HarnessUpdate, HarnessError>>;
 }
@@ -1601,7 +1611,7 @@ export interface BenchmarkService {
   getManifest(id: BenchmarkSuiteId): Promise<Result<BenchmarkManifest, EvolutionError>>;
   runTask(suiteId: BenchmarkSuiteId, taskId: BenchmarkTaskId, harnessId: HarnessId, route: ModelRouteSignature): Promise<Result<BenchmarkRun, EvolutionError>>;
   /** The evaluator is derived from the incumbent harness; callers cannot supply it. */
-  runPaired(suiteId: BenchmarkSuiteId, incumbentId: HarnessId, candidateId: HarnessId): Promise<Result<PromotionScorecard, EvolutionError>>;
+  runPaired(suiteId: BenchmarkSuiteId, incumbentId: HarnessId, candidateId: HarnessId, signal?: AbortSignal): Promise<Result<PromotionScorecard, EvolutionError>>;
   getScorecard(id: ScorecardId): Promise<Result<PromotionScorecard, EvolutionError>>;
   listScorecards(projectId: ProjectId, page: PageRequest): Promise<Result<Page<PromotionScorecard>, EvolutionError>>;
   recordCanary(harnessId: HarnessId, source: CanarySource): Promise<Result<CanaryResult, EvolutionError>>;
@@ -1649,9 +1659,16 @@ export type CreateSessionService = (options: {
   readonly models: ModelRouter;
   readonly policy: ExecutionPolicy;
   readonly objects: ObjectStore;
+  readonly runnerRequests: RunnerProtocolDispatcher;
 }) => SessionService;
+export type CreateRunnerProtocolDispatcher = (context: () => OmegaContext) => RunnerProtocolDispatcher;
 export type CreateKnowledgeService = (root: AbsolutePath, objects: ObjectStore) => KnowledgeService;
-export type CreateMarketplaceService = (root: AbsolutePath, objects: ObjectStore) => MarketplaceService;
+export type CreateMarketplaceService = (options: {
+  readonly root: AbsolutePath;
+  readonly objects: ObjectStore;
+  readonly harnesses: HarnessRepository;
+  readonly activation: HarnessActivationService;
+}) => MarketplaceService;
 export type CreateBenchmarkService = (options: {
   readonly root: AbsolutePath;
   readonly objects: ObjectStore;
@@ -1662,6 +1679,8 @@ export type CreateBenchmarkService = (options: {
 }) => BenchmarkService;
 export type CreateEvolutionService = (options: {
   readonly root: AbsolutePath;
+  readonly objects: ObjectStore;
+  readonly repository: SessionRepository;
   readonly sessions: SessionService;
   readonly harnesses: HarnessRepository;
   readonly benchmarks: BenchmarkService;
@@ -1672,7 +1691,7 @@ export type CreateOmegaClient = (baseUrl: string, bearerToken: string) => OmegaC
 export type RunCli = (argv: readonly string[], client: OmegaClient) => Promise<number>;
 export type RenderHtmlApp = (config: OmegaConfig["server"]) => string;
 export type CreateOmegaApplication = (config: OmegaConfig, environment: EnvironmentVariables) => OmegaApplication;
-export type StartHttpServer = (application: OmegaApplication, config: OmegaConfig["server"]) => Promise<Result<HttpServerHandle, IoError | ValidationError>>;
+export type StartHttpServer = (application: OmegaApplication, config: OmegaConfig["server"], environment: EnvironmentVariables) => Promise<Result<HttpServerHandle, IoError | ValidationError>>;
 
 /**
  * The sole wiring context. Leaf modules receive only the interfaces they need;
@@ -1690,6 +1709,7 @@ export interface OmegaContext {
   readonly sessions: SessionService;
   readonly harnesses: HarnessRepository;
   readonly runners: RunnerHost;
+  readonly runnerRequests: RunnerProtocolDispatcher;
   readonly activation: HarnessActivationService;
   readonly knowledge: KnowledgeService;
   readonly marketplace: MarketplaceService;

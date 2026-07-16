@@ -42,6 +42,7 @@ type RunnerState = {
   currentHarnessId: HarnessId;
   stdoutOffset: ByteCount;
   stderrOffset: ByteCount;
+  stderrTail: string;
   inputBuffer: Buffer;
   readonly received: RunnerToKernelEnvelope[];
   readonly pendingRequests: Set<RequestId>;
@@ -84,6 +85,7 @@ export const createRunnerHost: CreateRunnerHost = (processes, harnesses) => {
         currentHarnessId: start.harness.id,
         stdoutOffset: 0 as ByteCount,
         stderrOffset: 0 as ByteCount,
+        stderrTail: "",
         inputBuffer: Buffer.alloc(0),
         received: [],
         pendingRequests: new Set(),
@@ -234,6 +236,7 @@ async function poll(processes: ProcessSupervisor, state: RunnerState): Promise<R
     if (slice.stream === "stderr") {
       if (slice.range.startInclusive === state.stderrOffset) {
         state.stderrOffset = slice.range.endExclusive;
+        state.stderrTail = `${state.stderrTail}${bytes.toString("utf8")}`.slice(-2_048);
       }
       continue;
     }
@@ -248,7 +251,10 @@ async function poll(processes: ProcessSupervisor, state: RunnerState): Promise<R
     state.terminal = true;
     finishPartialLine(state);
     if (!state.ready) {
-      state.received.push(protocolEnvelope("Runner terminated before ready handshake"));
+      const detail = state.stderrTail.trim();
+      state.received.push(protocolEnvelope(detail.length === 0
+        ? "Runner terminated before ready handshake"
+        : `Runner terminated before ready handshake: ${detail}`));
     }
   }
   return observed;
@@ -377,7 +383,7 @@ function runnerProcessSpec(
   credentialEnvNames: ProcessSpec["credentialEnvNames"],
 ): ProcessSpec {
   const inline = entrypoint.startsWith("inline-base64:") ? Buffer.from(entrypoint.slice("inline-base64:".length), "base64").toString("utf8") : null;
-  const command = runtime === "node" ? process.execPath : runtime === "python" ? "python3" : runtime === "bash" ? "bash" : entrypoint;
+  const command = runtime === "node" ? "node" : runtime === "python" ? "python3" : runtime === "bash" ? "bash" : entrypoint;
   const args = runtime === "native" ? [] : inline === null ? [entrypoint] : ["--input-type=module", "--eval", inline];
   return {
     executable: command,
@@ -391,7 +397,7 @@ function runnerProcessSpec(
       network: "none",
       allowedHosts: [],
       memoryLimitBytes: (512 * 1024 * 1024) as ByteCount,
-      cpuTimeLimitMs: 3_600_000 as DurationMs,
+      cpuTimeLimitMs: 1_800_000 as DurationMs,
       runtime: {
         kind: "oci",
         image: "omega-runner:local",
@@ -410,13 +416,10 @@ function parseRunnerEnvelope(value: JsonValue): Result<RunnerToKernelEnvelope, P
     return protocol("Runner envelope has an unsupported protocol, version, or shape");
   }
   const message = value["message"];
-  if (message["kind"] === "runner.ready" && typeof message["harnessId"] === "string") {
+  if (message["kind"] === "runner.ready" && isId(message["harnessId"])) {
     return { ok: true, value: value as RunnerToKernelEnvelope };
   }
-  if (message["kind"] === "runner.request" && isObject(message["request"])
-    && typeof message["request"]["kind"] === "string" && REQUEST_KINDS.has(message["request"]["kind"])
-    && typeof message["request"]["requestId"] === "string"
-    && hasRequestHarnessShape(message["request"])) {
+  if (message["kind"] === "runner.request" && isRunnerRequest(message["request"])) {
     return { ok: true, value: value as RunnerToKernelEnvelope };
   }
   if (message["kind"] === "runner.protocol-error" && isProtocolErrorValue(message["error"])) {
@@ -425,14 +428,239 @@ function parseRunnerEnvelope(value: JsonValue): Result<RunnerToKernelEnvelope, P
   return protocol("Runner envelope message has an invalid discriminator or shape");
 }
 
-function hasRequestHarnessShape(request: JsonObject): boolean {
-  if (request["kind"] === "model.start") {
-    return isObject(request["request"]) && typeof request["request"]["harnessId"] === "string";
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u;
+const MODEL_ROLES = new Set(["main-coder", "fast-policy", "harness-mutator", "promotion-evaluator", "diagnostician", "crystallizer"]);
+const CAPABILITY_KINDS = new Set([
+  "model-call", "read-files", "write-files", "start-process", "process-input", "network-egress", "inject-credential",
+  "spawn-child", "write-knowledge", "install-marketplace", "publish-marketplace", "manage-marketplace",
+  "create-harness-candidate", "run-promotion-eval", "activate-harness",
+]);
+const COMPONENT_KINDS = new Set(["runner", "tool", "connector", "skill", "workflow", "context-compiler", "promotion-evaluator", "policy-prompt"]);
+const MARKETPLACE_KINDS = new Set(["harness", "tool", "connector", "skill", "workflow", "component-delta"]);
+const MARKETPLACE_STATES = new Set(["experimental", "proven", "deprecated"]);
+
+function isRunnerRequest(value: JsonValue | undefined): value is RunnerRequest {
+  if (!isObject(value) || typeof value["kind"] !== "string" || !REQUEST_KINDS.has(value["kind"]) || !isId(value["requestId"])) return false;
+  switch (value["kind"]) {
+    case "model.start":
+      return isModelRequest(value["request"]);
+    case "process.start":
+      return isProcessSpec(value["spec"]);
+    case "process.observe":
+      return isId(value["processId"]) && isArray(value["after"], (cursor) => isObject(cursor)
+        && (cursor["stream"] === "stdout" || cursor["stream"] === "stderr") && isNonNegativeInteger(cursor["offset"]));
+    case "process.input":
+      return isId(value["processId"]) && isProcessInput(value["input"]);
+    case "process.cancel":
+      return isId(value["processId"]) && typeof value["reason"] === "string";
+    case "artifact.read":
+      return isId(value["artifactId"]) && isNonNegativeInteger(value["offset"]) && isPositiveInteger(value["limit"]);
+    case "file.read":
+      return isId(value["workspaceId"]) && isNonEmptyString(value["path"]);
+    case "file.write":
+      return isFileWriteRequest(value["request"]);
+    case "child.spawn":
+      return isSpawnChildRequest(value["request"]);
+    case "child.observe":
+      return isId(value["sessionId"]);
+    case "knowledge.catalog":
+      return isKnowledgeQuery(value["query"]);
+    case "knowledge.read":
+      return isId(value["documentId"]);
+    case "knowledge.write":
+      return isKnowledgeWriteRequest(value["request"]);
+    case "marketplace.search":
+      return isMarketplaceQuery(value["query"]);
+    case "marketplace.install":
+      return isId(value["artifactId"]);
+    case "harness.evolve":
+      return isEvolutionRequest(value["request"]);
+    case "harness.status":
+      return isId(value["projectId"]);
+    case "evolution.observe":
+      return isId(value["jobId"]);
+    case "evolution.cancel":
+      return isId(value["jobId"]) && typeof value["reason"] === "string";
+    case "session.complete":
+      return value["outcome"] === "succeeded" || value["outcome"] === "failed" || value["outcome"] === "cancelled";
+    default:
+      return false;
   }
-  if (request["kind"] === "process.start") {
-    return isObject(request["spec"]) && typeof request["spec"]["harnessId"] === "string";
+}
+
+function isModelRequest(value: JsonValue | undefined): boolean {
+  return isObject(value)
+    && isId(value["sessionId"])
+    && isId(value["harnessId"])
+    && typeof value["role"] === "string"
+    && MODEL_ROLES.has(value["role"])
+    && isArray(value["messages"], isModelMessage)
+    && isArray(value["tools"], isToolSchema)
+    && isPositiveInteger(value["maxOutputTokens"])
+    && isPositiveInteger(value["abortAfterMs"]);
+}
+
+function isModelMessage(value: JsonValue): boolean {
+  if (!isObject(value) || !Array.isArray(value["content"])) return false;
+  if (value["role"] === "system" || value["role"] === "user") {
+    return value["content"].every((part) => isTextPart(part) || isToolResultPart(part));
   }
+  if (value["role"] === "assistant") return value["content"].every(isModelContentPart);
+  if (value["role"] === "tool") return value["content"].every(isToolResultPart);
+  return false;
+}
+
+function isModelContentPart(value: JsonValue): boolean {
+  return isTextPart(value) || isReasoningPart(value) || isToolCallPart(value) || isToolResultPart(value);
+}
+
+function isTextPart(value: JsonValue): boolean {
+  return isObject(value) && value["kind"] === "text" && typeof value["text"] === "string";
+}
+
+function isReasoningPart(value: JsonValue): boolean {
+  return isObject(value) && value["kind"] === "reasoning" && typeof value["text"] === "string";
+}
+
+function isToolCallPart(value: JsonValue): boolean {
+  return isObject(value) && value["kind"] === "tool-call" && isNonEmptyString(value["callId"])
+    && isNonEmptyString(value["toolName"]) && isObject(value["input"]);
+}
+
+function isToolResultPart(value: JsonValue): boolean {
+  return isObject(value) && value["kind"] === "tool-result" && isNonEmptyString(value["callId"])
+    && isNonEmptyString(value["toolName"]) && Object.hasOwn(value, "result") && typeof value["isError"] === "boolean";
+}
+
+function isToolSchema(value: JsonValue): boolean {
+  return isObject(value) && isNonEmptyString(value["name"]) && typeof value["description"] === "string" && isObject(value["inputSchema"]);
+}
+
+function isProcessSpec(value: JsonValue | undefined): boolean {
+  if (!isObject(value) || !isNonEmptyString(value["executable"]) || !isArray(value["args"], isString)
+    || !isNonEmptyString(value["cwd"]) || !isArray(value["credentialEnvNames"], isNonEmptyString)
+    || (value["stdin"] !== "closed" && value["stdin"] !== "pipe")
+    || (value["timeoutMs"] !== null && !isPositiveInteger(value["timeoutMs"]))
+    || !isId(value["harnessId"]) || !isId(value["sessionId"]) || !isObject(value["sandbox"])) return false;
+  const sandbox = value["sandbox"];
+  if ((sandbox["filesystem"] !== "workspace-read-only" && sandbox["filesystem"] !== "workspace-read-write")
+    || (sandbox["network"] !== "none" && sandbox["network"] !== "allowlist" && sandbox["network"] !== "unrestricted")
+    || !isArray(sandbox["allowedHosts"], isNonEmptyString) || !isPositiveInteger(sandbox["memoryLimitBytes"])
+    || !isPositiveInteger(sandbox["cpuTimeLimitMs"]) || !isObject(sandbox["runtime"])) return false;
+  const runtime = sandbox["runtime"];
+  return runtime["kind"] === "oci" && isNonEmptyString(runtime["image"])
+    && (runtime["expectedImageDigest"] === null || isSha256(runtime["expectedImageDigest"]))
+    && isNonEmptyString(runtime["containerUser"]) && isNonEmptyString(runtime["workspaceMountPath"]);
+}
+
+function isProcessInput(value: JsonValue | undefined): boolean {
+  if (!isObject(value)) return false;
+  if (value["kind"] === "close-stdin") return true;
+  if (value["kind"] === "signal") return value["signal"] === "SIGINT" || value["signal"] === "SIGTERM" || value["signal"] === "SIGHUP";
+  return value["kind"] === "data" && (value["encoding"] === "utf8" || value["encoding"] === "base64") && typeof value["data"] === "string";
+}
+
+function isFileWriteRequest(value: JsonValue | undefined): boolean {
+  return isObject(value) && isId(value["sessionId"]) && isId(value["workspaceId"]) && isNonEmptyString(value["path"])
+    && (value["expectedSha"] === null || isSha256(value["expectedSha"])) && typeof value["content"] === "string";
+}
+
+function isSpawnChildRequest(value: JsonValue | undefined): boolean {
+  return isObject(value) && isId(value["parentSessionId"])
+    && (value["role"] === "task" || value["role"] === "evolution" || value["role"] === "promotion-eval"
+      || value["role"] === "diagnostician" || value["role"] === "crystallizer")
+    && isNonEmptyString(value["objective"]) && isArray(value["contextArtifactIds"], isId)
+    && isCapabilityEnvelope(value["capabilityEnvelope"]);
+}
+
+function isCapabilityEnvelope(value: JsonValue | undefined): boolean {
+  return isObject(value) && isArray(value["grants"], isCapabilityGrant) && isArray(value["modelRoles"], isModelRole)
+    && isNonNegativeInteger(value["maxCostUsdMicros"]) && isNonNegativeInteger(value["maxModelCalls"])
+    && isNonNegativeInteger(value["maxProcessStarts"]) && isNonNegativeInteger(value["maxInputTokens"])
+    && isNonNegativeInteger(value["maxOutputTokens"]) && isPositiveInteger(value["wallTimeMs"])
+    && isNonEmptyString(value["createdAt"]);
+}
+
+function isCapabilityGrant(value: JsonValue): boolean {
+  if (!isObject(value) || typeof value["kind"] !== "string" || !CAPABILITY_KINDS.has(value["kind"])) return false;
+  if (value["kind"] === "read-files" || value["kind"] === "write-files") return isArray(value["pathPrefixes"], isNonEmptyString);
+  if (value["kind"] === "start-process") return isArray(value["executableNames"], isNonEmptyString);
+  if (value["kind"] === "network-egress") return isArray(value["allowedHosts"], isNonEmptyString);
+  if (value["kind"] === "inject-credential") return isArray(value["credentialEnvNames"], isNonEmptyString);
   return true;
+}
+
+function isKnowledgeQuery(value: JsonValue | undefined): boolean {
+  return isObject(value) && isId(value["projectId"]) && typeof value["text"] === "string"
+    && isArray(value["tags"], isString) && isArray(value["relevantPaths"], isNonEmptyString) && isPositiveInteger(value["limit"]);
+}
+
+function isKnowledgeWriteRequest(value: JsonValue | undefined): boolean {
+  if (!isObject(value) || !isId(value["projectId"]) || !isObject(value["document"])
+    || (value["expectedSha"] !== null && !isSha256(value["expectedSha"]))) return false;
+  const document = value["document"];
+  return isId(document["projectId"]) && typeof document["markdown"] === "string" && isKnowledgeFrontmatter(document["frontmatter"]);
+}
+
+function isKnowledgeFrontmatter(value: JsonValue | undefined): boolean {
+  return isObject(value) && isId(value["id"]) && isNonEmptyString(value["title"]) && typeof value["summary"] === "string"
+    && isArray(value["tags"], isString) && isFiniteNumber(value["confidence"]) && isNonEmptyString(value["verifiedAt"])
+    && isArray(value["sourceSessionIds"], isId) && isArray(value["sourceArtifactIds"], isId)
+    && isArray(value["relevantPaths"], isNonEmptyString) && isArray(value["invalidationConditions"], isString);
+}
+
+function isMarketplaceQuery(value: JsonValue | undefined): boolean {
+  return isObject(value) && typeof value["text"] === "string"
+    && isArray(value["kinds"], (kind) => typeof kind === "string" && MARKETPLACE_KINDS.has(kind))
+    && isArray(value["states"], (state) => typeof state === "string" && MARKETPLACE_STATES.has(state))
+    && isPositiveInteger(value["limit"]);
+}
+
+function isEvolutionRequest(value: JsonValue | undefined): boolean {
+  if (!isObject(value) || !isId(value["projectId"]) || !isId(value["sourceSessionId"]) || !isNonEmptyString(value["goal"])
+    || !isArray(value["evidenceArtifactIds"], isId)
+    || !isArray(value["allowedComponentKinds"], (kind) => typeof kind === "string" && COMPONENT_KINDS.has(kind))
+    || !isObject(value["budget"])) return false;
+  const budget = value["budget"];
+  return isPositiveInteger(budget["wallTimeMs"]) && isNonNegativeInteger(budget["maxModelCalls"])
+    && isNonNegativeInteger(budget["maxInputTokens"]) && isNonNegativeInteger(budget["maxOutputTokens"])
+    && isNonNegativeInteger(budget["maxCostUsdMicros"]) && isNonNegativeInteger(budget["maxProcessStarts"]);
+}
+
+function isArray(value: JsonValue | undefined, predicate: (item: JsonValue) => boolean): boolean {
+  return Array.isArray(value) && value.every(predicate);
+}
+
+function isString(value: JsonValue): boolean {
+  return typeof value === "string";
+}
+
+function isNonEmptyString(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0");
+}
+
+function isId(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && ID_PATTERN.test(value);
+}
+
+function isSha256(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function isNonNegativeInteger(value: JsonValue | undefined): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: JsonValue | undefined): value is number {
+  return isNonNegativeInteger(value) && value > 0;
+}
+
+function isFiniteNumber(value: JsonValue | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isModelRole(value: JsonValue): boolean {
+  return typeof value === "string" && MODEL_ROLES.has(value);
 }
 
 function validateKernelEnvelope(envelope: KernelToRunnerEnvelope): Result<void, HarnessError> {

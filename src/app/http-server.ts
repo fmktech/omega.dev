@@ -7,6 +7,7 @@ import { isAbsolute } from "node:path";
 import type {
   ClientRequest,
   CredentialEnvName,
+  EnvironmentVariables,
   InternalError,
   IoError,
   JsonObject,
@@ -92,6 +93,18 @@ function requireString(value: JsonValue | undefined, field: string): string {
   return value;
 }
 
+function requireText(value: JsonValue | undefined, field: string): string {
+  if (typeof value !== "string") throw boundaryValidation(`${field} must be a string`, field);
+  return value;
+}
+
+function requireStringArray(value: JsonValue | undefined, field: string, ids = false): readonly string[] {
+  if (!Array.isArray(value)) throw boundaryValidation(`${field} must be an array`, field);
+  return value.map((item, index) => ids
+    ? requireId(item, `${field}[${index}]`)
+    : requireText(item, `${field}[${index}]`));
+}
+
 function requireId(value: JsonValue | undefined, field: string): string {
   const id = requireString(value, field);
   if (!ID_PATTERN.test(id)) throw boundaryValidation(`${field} has an invalid branded-ID encoding`, field);
@@ -134,6 +147,85 @@ function validateEncodedIds(value: JsonValue, path = "request"): void {
   }
 }
 
+function requirePositiveInteger(value: JsonValue | undefined, field: string): number {
+  const result = requireNonNegativeInteger(value, field);
+  if (result === 0) throw boundaryValidation(`${field} must be greater than zero`, field);
+  return result;
+}
+
+function validateTaskStart(value: JsonValue | undefined): void {
+  const nested = requireObject(value, "request");
+  requireId(nested["projectId"], "request.projectId");
+  requireId(nested["workspaceId"], "request.workspaceId");
+  requireString(nested["objective"], "request.objective");
+  if (nested["modelRole"] !== "main-coder") throw boundaryValidation("request.modelRole must be main-coder", "request.modelRole");
+}
+
+function validateResume(value: JsonValue | undefined): void {
+  const nested = requireObject(value, "request");
+  requireId(nested["sourceSessionId"], "request.sourceSessionId");
+  requireId(nested["workspaceId"], "request.workspaceId");
+  requireId(nested["handoffArtifactId"], "request.handoffArtifactId");
+  requireStringArray(nested["contextArtifactIds"], "request.contextArtifactIds", true);
+}
+
+function validatePolicyResolution(value: JsonValue | undefined): void {
+  const nested = requireObject(value, "request");
+  requireId(nested["escalationId"], "request.escalationId");
+  if (nested["resolution"] !== "allow" && nested["resolution"] !== "deny") {
+    throw boundaryValidation("request.resolution must be allow or deny", "request.resolution");
+  }
+  requireString(nested["reason"], "request.reason");
+}
+
+function validateEvolutionRequest(value: JsonValue | undefined): void {
+  const nested = requireObject(value, "request");
+  requireId(nested["projectId"], "request.projectId");
+  requireId(nested["sourceSessionId"], "request.sourceSessionId");
+  requireString(nested["goal"], "request.goal");
+  requireStringArray(nested["evidenceArtifactIds"], "request.evidenceArtifactIds", true);
+  const kinds = requireStringArray(nested["allowedComponentKinds"], "request.allowedComponentKinds");
+  const allowedKinds = new Set(["runner", "tool", "connector", "skill", "workflow", "context-compiler", "promotion-evaluator", "policy-prompt"]);
+  if (kinds.some((kind) => !allowedKinds.has(kind))) throw boundaryValidation("request.allowedComponentKinds contains an invalid kind", "request.allowedComponentKinds");
+  const budget = requireObject(nested["budget"], "request.budget");
+  requirePositiveInteger(budget["wallTimeMs"], "request.budget.wallTimeMs");
+  requirePositiveInteger(budget["maxModelCalls"], "request.budget.maxModelCalls");
+  requirePositiveInteger(budget["maxInputTokens"], "request.budget.maxInputTokens");
+  requirePositiveInteger(budget["maxOutputTokens"], "request.budget.maxOutputTokens");
+  requireNonNegativeInteger(budget["maxCostUsdMicros"], "request.budget.maxCostUsdMicros");
+  requirePositiveInteger(budget["maxProcessStarts"], "request.budget.maxProcessStarts");
+}
+
+function validateMarketplaceTransition(value: JsonValue | undefined): void {
+  const nested = requireObject(value, "request");
+  requireId(nested["artifactId"], "request.artifactId");
+  const states = new Set(["experimental", "proven", "deprecated", "quarantined"]);
+  if (typeof nested["expectedState"] !== "string" || !states.has(nested["expectedState"])) throw boundaryValidation("request.expectedState is invalid", "request.expectedState");
+  if (typeof nested["nextState"] !== "string" || !states.has(nested["nextState"])) throw boundaryValidation("request.nextState is invalid", "request.nextState");
+  requireString(nested["reason"], "request.reason");
+}
+
+function validateKnowledgeQuery(value: JsonValue | undefined): void {
+  const query = requireObject(value, "query");
+  requireId(query["projectId"], "query.projectId");
+  requireText(query["text"], "query.text");
+  requireStringArray(query["tags"], "query.tags");
+  requireStringArray(query["relevantPaths"], "query.relevantPaths");
+  requirePositiveInteger(query["limit"], "query.limit");
+}
+
+function validateMarketplaceQuery(value: JsonValue | undefined): void {
+  const query = requireObject(value, "query");
+  requireText(query["text"], "query.text");
+  const kinds = requireStringArray(query["kinds"], "query.kinds");
+  const states = requireStringArray(query["states"], "query.states");
+  const allowedKinds = new Set(["harness", "tool", "connector", "skill", "workflow", "component-delta"]);
+  const allowedStates = new Set(["experimental", "proven", "deprecated"]);
+  if (kinds.some((kind) => !allowedKinds.has(kind))) throw boundaryValidation("query.kinds contains an invalid kind", "query.kinds");
+  if (states.some((state) => !allowedStates.has(state))) throw boundaryValidation("query.states contains an invalid state", "query.states");
+  requirePositiveInteger(query["limit"], "query.limit");
+}
+
 function parseClientRequest(text: string): ClientRequest {
   let value: JsonValue;
   try {
@@ -155,13 +247,11 @@ function parseClientRequest(text: string): ClientRequest {
       if (!isAbsolute(path)) throw boundaryValidation("path must be absolute", "path");
       break;
     }
-    case "task.start":
-    case "thread.resume":
-    case "policy.resolve":
-    case "evolution.start":
-    case "marketplace.transition":
-      requireObject(request["request"], "request");
-      break;
+    case "task.start": validateTaskStart(request["request"]); break;
+    case "thread.resume": validateResume(request["request"]); break;
+    case "policy.resolve": validatePolicyResolution(request["request"]); break;
+    case "evolution.start": validateEvolutionRequest(request["request"]); break;
+    case "marketplace.transition": validateMarketplaceTransition(request["request"]); break;
     case "session.get": requireId(request["sessionId"], "sessionId"); break;
     case "session.list":
     case "evolution.list":
@@ -187,8 +277,8 @@ function parseClientRequest(text: string): ClientRequest {
       requireId(request["suiteId"], "suiteId"); requireId(request["incumbentId"], "incumbentId"); requireId(request["candidateId"], "candidateId");
       break;
     case "scorecard.get": requireId(request["scorecardId"], "scorecardId"); break;
-    case "knowledge.catalog":
-    case "marketplace.search": requireObject(request["query"], "query"); break;
+    case "knowledge.catalog": validateKnowledgeQuery(request["query"]); break;
+    case "marketplace.search": validateMarketplaceQuery(request["query"]); break;
     case "knowledge.read": requireId(request["projectId"], "projectId"); requireId(request["documentId"], "documentId"); break;
     case "harness.get": requireId(request["harnessId"], "harnessId"); break;
     case "harness.rollback":
@@ -225,8 +315,8 @@ function authenticate(request: IncomingMessage, token: string): void {
   if (supplied.byteLength !== expected.byteLength || !timingSafeEqual(supplied, expected)) throw unauthorized();
 }
 
-function tokenFromEnvironment(name: CredentialEnvName): string | null {
-  const value = process.env[name];
+function tokenFromEnvironment(environment: EnvironmentVariables, name: CredentialEnvName): string | null {
+  const value = environment[name];
   return value === undefined || value.length === 0 ? null : value;
 }
 
@@ -276,14 +366,26 @@ async function handleRequest(
     const sessionId = rawSessionId as SessionId;
     const iterator = createSseBroker().open(sessionId, afterSequence, application.events(sessionId, afterSequence))[Symbol.asyncIterator]();
     const heartbeat = setInterval(() => { if (!response.destroyed) response.write(": heartbeat\n\n"); }, 15_000);
+    let markDisconnected: (() => void) | null = null;
+    const disconnected = new Promise<void>((resolve) => { markDisconnected = resolve; });
+    const onDisconnect = (): void => { markDisconnected?.(); };
+    request.once("aborted", onDisconnect);
+    response.once("close", onDisconnect);
     try {
       while (!response.destroyed) {
-        const next = await iterator.next();
+        const observed = await Promise.race([
+          iterator.next().then((next) => ({ kind: "event" as const, next })),
+          disconnected.then(() => ({ kind: "disconnected" as const })),
+        ]);
+        if (observed.kind === "disconnected") break;
+        const next = observed.next;
         if (next.done) break;
         if (!response.write(encodeSseFrame(next.value))) await new Promise<void>((resolve) => response.once("drain", resolve));
       }
     } finally {
       clearInterval(heartbeat);
+      request.off("aborted", onDisconnect);
+      response.off("close", onDisconnect);
       await iterator.return?.();
       if (!response.destroyed) response.end();
     }
@@ -292,11 +394,11 @@ async function handleRequest(
   sendJson(response, 404, { error: { kind: "protocol-error", protocol: "http", message: "Unknown Omega HTTP route", recoverable: false, callerAction: "abort" } });
 }
 
-export const startHttpServer: StartHttpServer = async (application, config) => {
+export const startHttpServer: StartHttpServer = async (application, config, environment) => {
   if (!Number.isSafeInteger(config.port) || config.port < 0 || config.port > 65_535) {
     return { ok: false, error: validation("Server port must be an integer between 0 and 65535", "server.port") };
   }
-  const token = tokenFromEnvironment(config.bearerTokenEnvName);
+  const token = tokenFromEnvironment(environment, config.bearerTokenEnvName);
   if (token === null) return { ok: false, error: validation("Bearer token environment variable is required", String(config.bearerTokenEnvName)) };
   const sockets = new Set<Socket>();
   const server = createServer((request, response) => {

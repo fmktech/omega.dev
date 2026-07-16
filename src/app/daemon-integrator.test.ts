@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG } from "../config/defaults.js";
 import type {
@@ -10,11 +10,14 @@ import type {
   EventId,
   HarnessId,
   HarnessManifest,
+  HarnessRepository,
   LiveEventEnvelope,
   OmegaApplication,
   ObjectDescriptor,
   ObjectHash,
   ProjectId,
+  ProjectRecord,
+  ProjectRepository,
   RequestId,
   SessionRecord,
   SessionId,
@@ -22,17 +25,10 @@ import type {
   WorkspaceId,
 } from "../contracts/index.js";
 import { startHttpServer } from "./http-server.js";
-import { createBenchmarkRunLauncher } from "./omega-app.js";
+import { createBenchmarkRunLauncher, ensureProjectHarness } from "./omega-app.js";
 
 const TOKEN_NAME = String(DEFAULT_CONFIG.server.bearerTokenEnvName);
 const TOKEN = "daemon-test-token";
-const originalToken = process.env[TOKEN_NAME];
-
-afterEach(() => {
-  if (originalToken === undefined) delete process.env[TOKEN_NAME];
-  else process.env[TOKEN_NAME] = originalToken;
-});
-
 function success(request: ClientRequest): ClientResponse {
   return {
     requestId: request.requestId,
@@ -52,8 +48,7 @@ function fakeApplication(overrides: Partial<OmegaApplication> = {}): OmegaApplic
 }
 
 async function withServer(application: OmegaApplication, run: (baseUrl: string) => Promise<void>): Promise<void> {
-  process.env[TOKEN_NAME] = TOKEN;
-  const started = await startHttpServer(application, { ...DEFAULT_CONFIG.server, port: 0 });
+  const started = await startHttpServer(application, { ...DEFAULT_CONFIG.server, port: 0 }, { [TOKEN_NAME]: TOKEN });
   expect(started.ok).toBe(true);
   if (!started.ok) return;
   try {
@@ -92,6 +87,12 @@ describe("daemon HTTP integration", () => {
       });
       expect(valid.status).toBe(200);
       expect(await valid.json()).toMatchObject({ requestId: "request-1", result: { ok: true } });
+      const malformedNested = await fetch(`${baseUrl}/api/v1/requests`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ kind: "task.start", requestId: "request-2", request: {} }),
+      });
+      expect(malformedNested.status).toBe(400);
     });
   });
 
@@ -157,9 +158,77 @@ describe("daemon HTTP integration", () => {
   });
 
   it("fails startup without a configured token", async () => {
-    delete process.env[TOKEN_NAME];
-    const result = await startHttpServer(fakeApplication(), { ...DEFAULT_CONFIG.server, port: 0 });
+    const result = await startHttpServer(fakeApplication(), { ...DEFAULT_CONFIG.server, port: 0 }, {});
     expect(result).toMatchObject({ ok: false, error: { kind: "validation" } });
+  });
+});
+
+describe("project harness bootstrap", () => {
+  it("indexes a deterministic initial harness before activation and safely repairs a retry", async () => {
+    const project: ProjectRecord = {
+      id: "project-bootstrap" as ProjectId,
+      displayName: "bootstrap",
+      repository: { canonicalRemote: null, initialRootHash: "0".repeat(64) as ProjectRecord["repository"]["initialRootHash"] },
+      activeHarnessId: null,
+      createdAt: "2026-07-16T00:00:00.000Z" as Timestamp,
+      updatedAt: "2026-07-16T00:00:00.000Z" as Timestamp,
+    };
+    const order: string[] = [];
+    let active: HarnessId | null = null;
+    let failIndex = true;
+    const manifests = new Map<HarnessId, HarnessManifest>();
+    const objects = {
+      async put(mediaType: string, chunks: AsyncIterable<Uint8Array>) {
+        const bytes: Uint8Array[] = [];
+        for await (const chunk of chunks) bytes.push(chunk);
+        const value = Buffer.concat(bytes);
+        const hash = createHash("sha256").update(value).digest("hex") as ObjectHash;
+        return { ok: true as const, value: { hash, size: value.byteLength as ByteCount, mediaType, createdAt: project.createdAt } };
+      },
+      async get(hash: ObjectHash) { return { ok: false as const, error: { kind: "not-found" as const, resource: "object", id: hash, recoverable: false as const, callerAction: "propagate" as const } }; },
+      async describe(hash: ObjectHash) { return { ok: false as const, error: { kind: "not-found" as const, resource: "object", id: hash, recoverable: false as const, callerAction: "propagate" as const } }; },
+    };
+    const projects: ProjectRepository = {
+      async registerWorkspace() { return { ok: false, error: { kind: "validation", message: "unused", field: null, recoverable: true, callerAction: "fix-request" } }; },
+      async registerBenchmarkWorkspace() { return { ok: false, error: { kind: "validation", message: "unused", field: null, recoverable: true, callerAction: "fix-request" } }; },
+      async getProject() { return { ok: true, value: { ...project, activeHarnessId: active } }; },
+      async getWorkspace(id) { return { ok: false, error: { kind: "not-found", resource: "workspace", id, recoverable: false, callerAction: "propagate" } }; },
+      async listProjects() { return { ok: true, value: { items: [], nextCursor: null } }; },
+      async compareAndSetActiveHarness(_id, expected, next) {
+        order.push("activate");
+        if (active !== expected) return { ok: false, error: { kind: "conflict", resource: "project-active-harness", expected: String(expected), actual: String(active), recoverable: true, callerAction: "refresh-version-and-retry" } };
+        active = next;
+        return { ok: true, value: { ...project, activeHarnessId: next } };
+      },
+    };
+    const harnesses: HarnessRepository = {
+      async putComponent(component) { return { ok: true, value: component }; },
+      async putHarness(manifest) {
+        order.push("index");
+        if (failIndex) {
+          failIndex = false;
+          return { ok: false, error: { kind: "io-error", operation: "index-harness", code: "EIO", recoverable: true, callerAction: "retry-with-backoff" } };
+        }
+        manifests.set(manifest.id, manifest);
+        return { ok: true, value: manifest };
+      },
+      async getHarness(id) {
+        const manifest = manifests.get(id);
+        return manifest === undefined ? { ok: false, error: { kind: "not-found", resource: "harness", id, recoverable: false, callerAction: "propagate" } } : { ok: true, value: manifest };
+      },
+      async getActiveHarness() { return active === null ? { ok: false, error: { kind: "not-found", resource: "harness", id: "active", recoverable: false, callerAction: "propagate" } } : this.getHarness(active); },
+      async listProjectHarnesses() { return { ok: true, value: { items: [...manifests.values()], nextCursor: null } }; },
+    };
+
+    expect((await ensureProjectHarness(project, objects, projects, harnesses)).ok).toBe(false);
+    expect(active).toBeNull();
+    expect(order).toEqual(["index"]);
+    const repaired = await ensureProjectHarness(project, objects, projects, harnesses);
+    expect(repaired.ok).toBe(true);
+    expect(order.slice(-2)).toEqual(["index", "activate"]);
+    if (!repaired.ok) return;
+    const repeated = await ensureProjectHarness(project, objects, projects, harnesses);
+    expect(repeated.ok && repeated.value.id).toBe(repaired.value.id);
   });
 });
 
@@ -273,7 +342,7 @@ describe("trusted benchmark launcher", () => {
       config: DEFAULT_CONFIG,
     });
     try {
-      const result = await launcher.execute({
+      const execution: Parameters<typeof launcher.execute>[0] = {
         suiteId: "suite" as Parameters<typeof launcher.execute>[0]["suiteId"],
         manifestVersion: "1",
         promotionPolicy: DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy,
@@ -281,7 +350,8 @@ describe("trusted benchmark launcher", () => {
         privateTask: { taskId: "task" as Parameters<typeof launcher.execute>[0]["task"]["id"], verifierObjectHash: verifierHash, negativeInvariantObjectHash: invariantHash, diagnosticTags: ["private-secret-tag"] },
         harness,
         route,
-      });
+      };
+      const result = await launcher.execute(execution);
       expect(result).toMatchObject({ ok: true, value: { sessionId: session.header.id, outcome: "passed" } });
       expect(sessionRequests).toHaveLength(1);
       expect(benchmarkRegistrations).toHaveLength(1);
@@ -294,6 +364,39 @@ describe("trusted benchmark launcher", () => {
       expect(sessionRequests[0]).not.toContain(invariantHash);
       expect(sessionRequests[0]).not.toContain("private-secret-tag");
       expect(stored).toBeGreaterThanOrEqual(3);
+
+      const pending: SessionRecord = { ...session, state: "running", completedAt: null, outcome: null };
+      const benchmarkStarted = Promise.withResolvers<void>();
+      const cancellationReasons: string[] = [];
+      const abortingLauncher = createBenchmarkRunLauncher({
+        root: root as AbsolutePath,
+        objects,
+        projects: {
+          async registerBenchmarkWorkspace(_requestedProjectId, path) {
+            return { ok: true, value: { id: pending.header.workspaceId, projectId, path, registeredAt: pending.header.createdAt, lastSeenAt: pending.header.createdAt } };
+          },
+        },
+        sessions: {
+          async startBenchmarkTask() { benchmarkStarted.resolve(); return { ok: true, value: pending }; },
+          async cancel(_sessionId, reason) {
+            cancellationReasons.push(reason);
+            return { ok: true, value: { ...pending, state: "cancelled", completedAt: pending.header.createdAt, outcome: "cancelled" } };
+          },
+        },
+        repository: {
+          async get() { return { ok: true, value: pending }; },
+          async read() { return { ok: true, value: [] }; },
+          async recordArtifact(record) { return { ok: true, value: record }; },
+        },
+        config: DEFAULT_CONFIG,
+      });
+      const controller = new AbortController();
+      const running = abortingLauncher.execute(execution, controller.signal);
+      await benchmarkStarted.promise;
+      controller.abort("operator cancellation");
+      const aborted = await running;
+      expect(aborted).toMatchObject({ ok: false, error: { field: "signal" } });
+      expect(cancellationReasons).toEqual(["benchmark evaluation cancelled"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

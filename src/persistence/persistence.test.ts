@@ -26,7 +26,7 @@ import type {
   UsdMicros,
   WorkspaceId,
 } from "../contracts/index.js";
-import { safeStorageKey } from "./artifact-store.js";
+import { safeStorageKey, withFileLock } from "./artifact-store.js";
 import { createFileObjectStore } from "./object-store.js";
 import { createFileProjectRepository } from "./project-repository.js";
 import { createFileSessionRepository } from "./session-repository.js";
@@ -39,6 +39,44 @@ afterEach(async () => {
 });
 
 describe("filesystem persistence", () => {
+  it("reclaims dead-owner file locks without admitting concurrent live owners", async () => {
+    const root = await temporaryRoot();
+    const resource = join(root, "locks", "resource.json");
+    await mkdir(join(root, "locks"), { recursive: true });
+    await writeFile(`${resource}.lock`, "2147483647\n", "utf8");
+
+    let active = 0;
+    let maximumActive = 0;
+    const enter = async (): Promise<void> => withFileLock(resource, async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+    });
+
+    await Promise.all([enter(), enter()]);
+
+    expect(maximumActive).toBe(1);
+    await expect(stat(`${resource}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("publishes owner metadata atomically and reclaims stale malformed locks", async () => {
+    const root = await temporaryRoot();
+    const resource = join(root, "locks", "malformed.json");
+    await mkdir(join(root, "locks"), { recursive: true });
+    const lockPath = `${resource}.lock`;
+    await writeFile(lockPath, "", "utf8");
+    const old = new Date(Date.now() - 1_000);
+    const { utimes } = await import("node:fs/promises");
+    await utimes(lockPath, old, old);
+
+    await withFileLock(resource, async () => {
+      expect(await readFile(lockPath, "utf8")).toBe(`${process.pid}\n`);
+    });
+
+    await expect(stat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("stores immutable SHA-256 objects idempotently and detects later corruption", async () => {
     const root = await temporaryRoot();
     const objects = createFileObjectStore(root as AbsolutePath);
@@ -232,6 +270,30 @@ describe("filesystem persistence", () => {
     if (events.ok) {
       expect(events.value.map((event) => event.sequence)).toEqual([1]);
     }
+  });
+
+  it("commits exactly one concurrent terminal event and rejects every post-terminal append", async () => {
+    const fixture = await sessionFixture();
+    const started = await fixture.sessions.append(
+      fixture.header.id, 0, { kind: "session.started" }, fixture.header.initialHarnessId, null,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    const terminals = await Promise.all([
+      fixture.sessions.append(fixture.header.id, 1, { kind: "session.completed", outcome: "succeeded" }, fixture.header.initialHarnessId, null),
+      fixture.sessions.append(fixture.header.id, 1, { kind: "session.completed", outcome: "cancelled" }, fixture.header.initialHarnessId, null),
+    ]);
+
+    expect(terminals.filter((result) => result.ok)).toHaveLength(1);
+    const afterTerminal = await fixture.sessions.append(
+      fixture.header.id, 2, { kind: "session.recovered", interruptedProcessIds: [] }, fixture.header.initialHarnessId, null,
+    );
+    expect(afterTerminal.ok).toBe(false);
+    if (!afterTerminal.ok) expect(afterTerminal.error.kind).toBe("conflict");
+    const events = await fixture.sessions.read(fixture.header.id, 0, 10);
+    expect(events.ok).toBe(true);
+    if (events.ok) expect(events.value.filter((event) => event.payload.kind === "session.completed")).toHaveLength(1);
   });
 
   it("drops only a trailing partial JSONL record and preserves valid history", async () => {

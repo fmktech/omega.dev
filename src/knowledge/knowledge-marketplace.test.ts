@@ -12,9 +12,13 @@ import type {
   CapabilityEnvelope,
   CapabilityGrant,
   ComponentId,
+  ComponentManifest,
   CredentialEnvName,
   DurationMs,
+  HarnessActivationService,
   HarnessId,
+  HarnessManifest,
+  HarnessRepository,
   KnowledgeDocument,
   KnowledgeDocumentId,
   MarketplaceArtifact,
@@ -131,7 +135,7 @@ describe("project knowledge", () => {
 describe("local marketplace", () => {
   it("automatically publishes valid local artifacts and makes duplicate publication idempotent", async () => {
     const { root, objects } = await fixture();
-    const service = createMarketplaceService(root, objects);
+    const service = marketplaceFixture(root, objects).service;
     const artifact = await marketplaceArtifact(objects, "jira", "experimental");
 
     const first = await service.publish(artifact);
@@ -151,7 +155,7 @@ describe("local marketplace", () => {
 
   it("rejects missing provenance and malformed credential declarations", async () => {
     const { root, objects } = await fixture();
-    const service = createMarketplaceService(root, objects);
+    const service = marketplaceFixture(root, objects).service;
     const artifact = await marketplaceArtifact(objects, "invalid", "experimental");
 
     const missingProvenance = await service.publish({ ...artifact, sourceHarnessId: "" as HarnessId });
@@ -166,7 +170,7 @@ describe("local marketplace", () => {
 
   it("enforces state transitions and permanently denies quarantined installs", async () => {
     const { root, objects } = await fixture();
-    const service = createMarketplaceService(root, objects);
+    const service = marketplaceFixture(root, objects).service;
     const artifact = await marketplaceArtifact(objects, "stateful", "experimental");
     expect((await service.publish(artifact)).ok).toBe(true);
 
@@ -195,7 +199,8 @@ describe("local marketplace", () => {
 
   it("checks manifest compatibility and credential grants before installation", async () => {
     const { root, objects } = await fixture();
-    const service = createMarketplaceService(root, objects);
+    const runtime = marketplaceFixture(root, objects);
+    const service = runtime.service;
     const artifact = await marketplaceArtifact(objects, "credentialed", "proven");
     const credentialed: MarketplaceArtifact = {
       ...artifact,
@@ -219,6 +224,18 @@ describe("local marketplace", () => {
       capabilitiesWithCredential("JIRA_API_TOKEN" as CredentialEnvName),
     );
     expect(permitted.ok && permitted.value.activation).toBe("active");
+    if (permitted.ok) {
+      expect(permitted.value.candidateHarnessId).toMatch(/^harness_[0-9a-f]{64}$/u);
+      expect(runtime.active.get("project-a" as ProjectId)).toBe(permitted.value.candidateHarnessId);
+      const candidate = runtime.manifests.get(permitted.value.candidateHarnessId);
+      expect(candidate?.parents).toEqual([runtime.incumbents.get("project-a" as ProjectId)?.id]);
+      expect(candidate?.components.map((component) => component.id)).toContain("component-credentialed");
+    }
+    expect(await service.install(
+      "project-a" as ProjectId,
+      credentialed.id,
+      capabilitiesWithCredential("JIRA_API_TOKEN" as CredentialEnvName),
+    )).toEqual(permitted);
 
     const incompatibleArtifact = await marketplaceArtifact(objects, "incompatible", "proven");
     const incompatible: MarketplaceArtifact = {
@@ -239,7 +256,8 @@ describe("local marketplace", () => {
 
   it("binds experimental canaries to an isolated project, artifact, and candidate lineage", async () => {
     const { root, objects } = await fixture();
-    const service = createMarketplaceService(root, objects);
+    const runtime = marketplaceFixture(root, objects);
+    const service = runtime.service;
     const artifact = await marketplaceArtifact(objects, "isolated", "experimental");
     expect((await service.publish(artifact)).ok).toBe(true);
     const grants = capabilities("install-marketplace", "create-harness-candidate", "activate-harness");
@@ -251,6 +269,8 @@ describe("local marketplace", () => {
       return;
     }
     expect(first.value.candidateHarnessId).not.toBe(second.value.candidateHarnessId);
+    expect(runtime.manifests.has(first.value.candidateHarnessId)).toBe(true);
+    expect(runtime.active.get("project-a" as ProjectId)).not.toBe(first.value.candidateHarnessId);
 
     const crossProject = await service.activateInstallation(
       canaryEvidence("project-a", artifact.id, second.value.candidateHarnessId),
@@ -263,10 +283,117 @@ describe("local marketplace", () => {
       grants,
     );
     expect(activated.ok && activated.value.activation).toBe("active");
+    expect(runtime.active.get("project-a" as ProjectId)).toBe(first.value.candidateHarnessId);
+    const retried = await service.activateInstallation(
+      canaryEvidence("project-a", artifact.id, first.value.candidateHarnessId),
+      grants,
+    );
+    expect(retried).toEqual(activated);
     const stillInactive = await service.install("project-b" as ProjectId, artifact.id, grants);
     expect(stillInactive.ok && stillInactive.value.activation).toBe("installed-inactive");
   });
 });
+
+function marketplaceFixture(root: AbsolutePath, objects: ObjectStore) {
+  const manifests = new Map<HarnessId, HarnessManifest>();
+  const incumbents = new Map<ProjectId, HarnessManifest>();
+  const active = new Map<ProjectId, HarnessId>();
+  const sourceComponents = ["jira", "invalid", "stateful", "credentialed", "incompatible", "isolated"].map(
+    (name): ComponentManifest => ({
+      id: `component-${name}` as ComponentId,
+      kind: "connector",
+      runtime: "document",
+      objectHash: "a".repeat(64) as ObjectHash,
+      entrypoint: name,
+      credentialEnvNames: name === "credentialed" ? ["JIRA_API_TOKEN" as CredentialEnvName] : [],
+      capabilities: [],
+    }),
+  );
+  const source: HarnessManifest = {
+    id: "source-harness" as HarnessId,
+    projectId: "source-project" as ProjectId,
+    alias: "source@1",
+    parents: [],
+    components: sourceComponents,
+    sourceArtifacts: [],
+    createdAt: timestamp(),
+  };
+  manifests.set(source.id, source);
+
+  function incumbent(projectId: ProjectId): HarnessManifest {
+    const existing = incumbents.get(projectId);
+    if (existing !== undefined) return existing;
+    const created: HarnessManifest = {
+      id: `harness_${createHash("sha256").update(`incumbent:${projectId}`).digest("hex")}` as HarnessId,
+      projectId,
+      alias: `${projectId}@1`,
+      parents: [],
+      components: [{
+        id: `component_${createHash("sha256").update(`runner:${projectId}`).digest("hex")}` as ComponentId,
+        kind: "runner",
+        runtime: "node",
+        objectHash: "b".repeat(64) as ObjectHash,
+        entrypoint: "runner.js",
+        credentialEnvNames: [],
+        capabilities: [],
+      }],
+      sourceArtifacts: [],
+      createdAt: timestamp(),
+    };
+    incumbents.set(projectId, created);
+    manifests.set(created.id, created);
+    active.set(projectId, created.id);
+    return created;
+  }
+
+  const harnesses: HarnessRepository = {
+    putComponent: async (component) => ({ ok: true, value: component }),
+    putHarness: async (manifest) => {
+      manifests.set(manifest.id, manifest);
+      return { ok: true, value: manifest };
+    },
+    getHarness: async (id) => {
+      const manifest = manifests.get(id);
+      return manifest === undefined
+        ? { ok: false, error: missingHarness(id) }
+        : { ok: true, value: manifest };
+    },
+    getActiveHarness: async (projectId) => {
+      incumbent(projectId);
+      const manifest = manifests.get(active.get(projectId) as HarnessId);
+      return manifest === undefined
+        ? { ok: false, error: missingHarness(String(projectId) as HarnessId) }
+        : { ok: true, value: manifest };
+    },
+    listProjectHarnesses: async (projectId, page) => ({
+      ok: true,
+      value: { items: [...manifests.values()].filter((manifest) => manifest.projectId === projectId).slice(0, page.limit), nextCursor: null },
+    }),
+  };
+  const activation: HarnessActivationService = {
+    promote: async () => { throw new Error("Unexpected promotion"); },
+    rollback: async () => { throw new Error("Unexpected rollback"); },
+    pin: async (projectId, target) => {
+      const previous = active.get(projectId) ?? incumbent(projectId).id;
+      if (!manifests.has(target)) return { ok: false, error: missingHarness(target) };
+      active.set(projectId, target);
+      return {
+        ok: true,
+        value: { projectId, previousHarnessId: previous, activeHarnessId: target, reason: "manual-pin", scorecardId: null, activatedAt: timestamp() },
+      };
+    },
+  };
+  return {
+    service: createMarketplaceService({ root, objects, harnesses, activation }),
+    active,
+    incumbents,
+    manifests,
+  };
+}
+
+function missingHarness(id: HarnessId) {
+  return { kind: "not-found" as const, resource: "harness", id, recoverable: false as const, callerAction: "propagate" as const };
+}
 
 class MemoryObjectStore implements ObjectStore {
   readonly #objects = new Map<ObjectHash, Uint8Array>();

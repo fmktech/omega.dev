@@ -109,6 +109,28 @@ describe("createOmegaClient", () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("afterSequence=1");
   });
 
+  it("aborts an idle SSE request as soon as the iterator is returned", async () => {
+    const aborted = vi.fn();
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockImplementation(async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal === null || signal === undefined) throw new Error("Expected an abort signal");
+        signal.addEventListener("abort", () => {
+          aborted();
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+      })));
+    const iterator = createOmegaClient(BASE_URL, "token").events("session-idle" as SessionId, 0)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+
+    const returned = iterator.return?.();
+
+    await expect(returned).resolves.toMatchObject({ done: true });
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(aborted).toHaveBeenCalledOnce();
+  });
+
   it("keeps base64 artifact slices encoded rather than interpreting binary as text", async () => {
     const requestId = "artifact-request" as RequestId;
     const wire = {
@@ -152,6 +174,27 @@ describe("runCli", () => {
     await expect(runCli(["sessions", "project-1", "-", "25"], client)).resolves.toBe(0);
     expect(calls).toEqual(["session.list"]);
   });
+
+  it("returns 130 when SIGINT interrupts an idle watch", async () => {
+    let finish: ((value: IteratorResult<LiveEventEnvelope>) => void) | null = null;
+    const iterator: AsyncIterator<LiveEventEnvelope> = {
+      next: async () => await new Promise<IteratorResult<LiveEventEnvelope>>((resolve) => { finish = resolve; }),
+      async return() {
+        finish?.({ done: true, value: undefined });
+        return { done: true, value: undefined };
+      },
+    };
+    const client: OmegaClient = {
+      async request(request) { return success(request.requestId); },
+      events() { return { [Symbol.asyncIterator]: () => iterator }; },
+    };
+    const running = runCli(["watch", "session-idle"], client);
+    await Promise.resolve();
+
+    process.emit("SIGINT");
+
+    await expect(running).resolves.toBe(130);
+  });
 });
 
 describe("renderHtmlApp", () => {
@@ -165,6 +208,10 @@ describe("renderHtmlApp", () => {
     expect(html).toContain("Local marketplace");
     expect(html).toContain("Promotion scorecards");
     expect(html).toContain("Reconnecting after interruption");
+    expect(html).toContain("Daemon token expired. Unlock again.");
+    expect(html).toContain('data-artifact="');
+    expect(html).toContain("async function paged");
+    expect(html).toContain("Retry</button>");
     expect(html).toContain("Binary artifact · base64");
     expect(html).toContain(DEFAULT_CONFIG.server.requestPath);
     expect(html).not.toContain("local" + "Storage");

@@ -98,9 +98,9 @@ function validateEvaluation(evaluation: PolicyEvaluation): ValidationError | nul
       if (!isAbsolutePath(evaluation.facts.sandbox.runtime.workspaceMountPath)) {
         return validation("facts.sandbox.runtime.workspaceMountPath", "Workspace mount must be an absolute normalized path");
       }
-      if (!absolutePathContains(evaluation.facts.sandbox.runtime.workspaceMountPath, evaluation.facts.cwd)) {
-        return validation("facts.cwd", "Process cwd must remain inside the sandbox workspace mount");
-      }
+      // `cwd` is the registered host-workspace path. The process supervisor
+      // validates it against the session workspace before the backend maps it
+      // to `workspaceMountPath` inside the container.
       if (evaluation.facts.args.some((argument) => argument.includes("\0"))) {
         return validation("facts.args", "Process arguments must not contain NUL bytes");
       }
@@ -149,6 +149,8 @@ function requiredCapabilities(facts: ActionFacts): readonly CapabilityKind[] {
   switch (facts.kind) {
     case "process": {
       const capabilities: CapabilityKind[] = ["start-process"];
+      capabilities.push("read-files");
+      if (facts.sandbox.filesystem === "workspace-read-write") capabilities.push("write-files");
       if (facts.sandbox.network !== "none") capabilities.push("network-egress");
       if (facts.credentialEnvNames.length > 0) capabilities.push("inject-credential");
       return capabilities;
@@ -196,6 +198,16 @@ function checkCapabilities(facts: ActionFacts, envelope: CapabilityEnvelope): Po
         !processGrant.executableNames.includes(basename(facts.executable))
       ) {
         return deny("Executable is outside the process capability scope", "capability:start-process");
+      }
+      const readGrant = findFileGrant(envelope.grants, "read-files");
+      if (readGrant === null || !readGrant.pathPrefixes.some((prefix) => String(prefix) === ".")) {
+        return deny("A process mount requires whole-workspace read authority", "capability:read-files");
+      }
+      if (facts.sandbox.filesystem === "workspace-read-write") {
+        const writeGrant = findFileGrant(envelope.grants, "write-files");
+        if (writeGrant === null || !writeGrant.pathPrefixes.some((prefix) => String(prefix) === ".")) {
+          return deny("A writable process mount requires whole-workspace write authority", "capability:write-files");
+        }
       }
       if (facts.sandbox.network !== "none") {
         const networkGrant = findNetworkGrant(envelope.grants);
@@ -560,10 +572,6 @@ function pathContains(prefix: RelativePath, candidate: RelativePath): boolean {
 
 function isAbsolutePath(path: string): boolean {
   return path.startsWith("/") && !path.includes("\0") && posix.normalize(path) === path;
-}
-
-function absolutePathContains(prefix: string, candidate: string): boolean {
-  return candidate === prefix || candidate.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`);
 }
 
 function isHost(host: string): boolean {

@@ -5,7 +5,6 @@ import type {
   CreateInitialHarness,
   HarnessError,
   HarnessId,
-  HarnessManifest,
   JsonObject,
   JsonValue,
   ObjectHash,
@@ -14,9 +13,96 @@ import type {
   Timestamp,
 } from "../contracts/index.js";
 
-const INITIAL_RUNNER = String.raw`let buffer="";
+const INITIAL_MODEL_TOOLS = [
+  { name: "file.read", description: "Read a UTF-8 workspace file and return content plus its SHA-256 interlock.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Repository-relative POSIX path" } }, required: ["path"], additionalProperties: false } },
+  { name: "file.write", description: "Create or replace a UTF-8 file. Pass the exact SHA from file.read when replacing; a stale SHA is rejected.", inputSchema: { type: "object", properties: { path: { type: "string" }, expectedSha: { type: ["string", "null"] }, content: { type: "string" } }, required: ["path", "expectedSha", "content"], additionalProperties: false } },
+  { name: "process.start", description: "Start one isolated workspace process. Network defaults to none. Use process.observe to stream output and state.", inputSchema: { type: "object", properties: { executable: { type: "string" }, args: { type: "array", items: { type: "string" } }, cwd: { type: "string" }, stdin: { enum: ["pipe", "closed"] }, timeoutMs: { type: ["integer", "null"] } }, required: ["executable", "args"], additionalProperties: false } },
+  { name: "process.observe", description: "Observe process state and output after byte offsets for stdout and stderr.", inputSchema: { type: "object", properties: { processId: { type: "string" }, after: { type: "array", items: { type: "object", properties: { stream: { enum: ["stdout", "stderr"] }, offset: { type: "integer", minimum: 0 } }, required: ["stream", "offset"], additionalProperties: false } } }, required: ["processId", "after"], additionalProperties: false } },
+  { name: "process.input", description: "Write stdin, close stdin, or send a signal to a running process.", inputSchema: { type: "object", properties: { processId: { type: "string" }, input: { type: "object" } }, required: ["processId", "input"], additionalProperties: false } },
+  { name: "process.cancel", description: "Stop a running process and preserve its stdout/stderr artifacts.", inputSchema: { type: "object", properties: { processId: { type: "string" }, reason: { type: "string" } }, required: ["processId", "reason"], additionalProperties: false } },
+  { name: "subagent.spawn", description: "Spawn an attenuated child session for a bounded subtask.", inputSchema: { type: "object", properties: { role: { type: "string" }, objective: { type: "string" }, contextArtifactIds: { type: "array", items: { type: "string" } }, capabilityEnvelope: { type: "object" } }, required: ["role", "objective", "contextArtifactIds", "capabilityEnvelope"], additionalProperties: false } },
+  { name: "subagent.observe", description: "Read the current state of a child session.", inputSchema: { type: "object", properties: { sessionId: { type: "string" } }, required: ["sessionId"], additionalProperties: false } },
+  { name: "knowledge.catalog", description: "Search short project-knowledge summaries before opening a full document.", inputSchema: { type: "object", properties: { text: { type: "string" }, tags: { type: "array", items: { type: "string" } }, relevantPaths: { type: "array", items: { type: "string" } }, limit: { type: "integer", minimum: 1 } }, required: ["text", "tags", "relevantPaths", "limit"], additionalProperties: false } },
+  { name: "knowledge.read", description: "Open one full project-knowledge document by ID.", inputSchema: { type: "object", properties: { documentId: { type: "string" } }, required: ["documentId"], additionalProperties: false } },
+  { name: "knowledge.write", description: "Persist a verified project-knowledge document with provenance and compare-and-swap SHA.", inputSchema: { type: "object", properties: { document: { type: "object" }, expectedSha: { type: ["string", "null"] } }, required: ["document", "expectedSha"], additionalProperties: false } },
+  { name: "marketplace.search", description: "Search locally created and vetted harness parts.", inputSchema: { type: "object", properties: { text: { type: "string" }, kinds: { type: "array", items: { type: "string" } }, states: { type: "array", items: { type: "string" } }, limit: { type: "integer", minimum: 1 } }, required: ["text", "kinds", "states", "limit"], additionalProperties: false } },
+  { name: "marketplace.install", description: "Create a project-scoped candidate from a trusted local marketplace artifact.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"], additionalProperties: false } },
+  { name: "harness.evolve", description: "Start a bounded evolution job using this session's evidence.", inputSchema: { type: "object", properties: { goal: { type: "string" }, evidenceArtifactIds: { type: "array", items: { type: "string" } }, allowedComponentKinds: { type: "array", items: { type: "string" } }, budget: { type: "object" } }, required: ["goal", "evidenceArtifactIds", "allowedComponentKinds", "budget"], additionalProperties: false } },
+  { name: "harness.status", description: "Read the project's currently active harness manifest.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+] as const;
+
+const INITIAL_RUNNER = String.raw`let buffer="",start=null,currentHarnessId=null,requestSequence=0,activeStream=null,toolCalls=new Map();
+const pending=new Map();
+const tools=${JSON.stringify(INITIAL_MODEL_TOOLS)};
+let messages=[];
+function emit(message){process.stdout.write(JSON.stringify({protocol:"omega-runner-jsonl",version:1,message})+"\n")}
+function request(value,done){const requestId="runner-"+(++requestSequence);pending.set(requestId,done);emit({kind:"runner.request",request:{...value,requestId}})}
+function finish(outcome){request({kind:"session.complete",outcome},()=>{process.exitCode=outcome==="succeeded"?0:1;setImmediate(()=>process.exit())})}
+function modelRequest(){
+  const route=start.session.initialModelRoutes.find(route=>route.role==="main-coder")||start.session.initialModelRoutes[0];
+  request({kind:"model.start",request:{sessionId:start.session.id,harnessId:currentHarnessId,role:"main-coder",messages,tools,maxOutputTokens:Math.min(Number(route?.outputLimit||32768),Number(start.session.capabilityEnvelope.maxOutputTokens)),abortAfterMs:Number(start.session.capabilityEnvelope.wallTimeMs)}},reply=>{
+    if(!reply.result?.ok){finish("failed");return}
+    activeStream=reply.result.value.streamId;toolCalls=new Map();
+  });
+}
+function toolRequest(call){
+  const input=call.input||{},session=start.session,workspace=start.workspace;
+  switch(call.toolName){
+    case "file.read":return {kind:"file.read",workspaceId:workspace.id,path:input.path};
+    case "file.write":return {kind:"file.write",request:{sessionId:session.id,workspaceId:workspace.id,path:input.path,expectedSha:input.expectedSha??null,content:String(input.content??"")}};
+    case "process.start":return {kind:"process.start",spec:{executable:String(input.executable??""),args:Array.isArray(input.args)?input.args.map(String):[],cwd:input.cwd||workspace.path,credentialEnvNames:Array.isArray(input.credentialEnvNames)?input.credentialEnvNames:[],stdin:input.stdin==="closed"?"closed":"pipe",timeoutMs:input.timeoutMs??null,sandbox:input.sandbox||{filesystem:"workspace-read-write",network:"none",allowedHosts:[],memoryLimitBytes:536870912,cpuTimeLimitMs:3600000,runtime:{kind:"oci",image:"omega-runner:local",expectedImageDigest:null,containerUser:"1000:1000",workspaceMountPath:"/workspace"}},harnessId:currentHarnessId,sessionId:session.id}};
+    case "process.observe":return {kind:"process.observe",processId:input.processId,after:Array.isArray(input.after)?input.after:[]};
+    case "process.input":return {kind:"process.input",processId:input.processId,input:input.input};
+    case "process.cancel":return {kind:"process.cancel",processId:input.processId,reason:String(input.reason||"cancelled by agent")};
+    case "subagent.spawn":return {kind:"child.spawn",request:{...input,parentSessionId:session.id}};
+    case "subagent.observe":return {kind:"child.observe",sessionId:input.sessionId};
+    case "knowledge.catalog":return {kind:"knowledge.catalog",query:{...input,projectId:session.projectId}};
+    case "knowledge.read":return {kind:"knowledge.read",documentId:input.documentId};
+    case "knowledge.write":return {kind:"knowledge.write",request:{...input,projectId:session.projectId}};
+    case "marketplace.search":return {kind:"marketplace.search",query:input};
+    case "marketplace.install":return {kind:"marketplace.install",artifactId:input.artifactId};
+    case "harness.evolve":return {kind:"harness.evolve",request:{...input,projectId:session.projectId,sourceSessionId:session.id}};
+    case "harness.status":return {kind:"harness.status",projectId:session.projectId};
+    default:return null;
+  }
+}
+function runTools(calls,index=0,results=[]){
+  if(index>=calls.length){messages.push({role:"assistant",content:calls});messages.push({role:"tool",content:results});modelRequest();return}
+  const call=calls[index],mapped=toolRequest(call);
+  if(!mapped){results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result:{error:"unsupported tool"},isError:true});runTools(calls,index+1,results);return}
+  request(mapped,reply=>{results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result:reply.result??reply,isError:reply.result?.ok===false||reply.kind==="request.rejected"});runTools(calls,index+1,results)});
+}
+function modelEvent(event){
+  if(event.kind==="tool-call")toolCalls.set(event.call.callId,event.call);
+  if(event.kind==="failed"){activeStream=null;finish("failed");return}
+  if(event.kind!=="completed")return;
+  if(activeStream!==null&&event.completion.streamId!==activeStream)return;
+  activeStream=null;
+  for(const part of event.completion.content)if(part.kind==="tool-call")toolCalls.set(part.callId,part);
+  const calls=[...toolCalls.values()];
+  if(calls.length===0){finish(event.completion.finishReason==="stop"?"succeeded":"failed");return}
+  runTools(calls);
+}
+function accept(envelope){
+  if(envelope.protocol!=="omega-runner-jsonl"||envelope.version!==1)throw new Error("unsupported kernel envelope");
+  const message=envelope.message;
+  if(message?.kind==="kernel.start"){
+    if(start!==null)throw new Error("duplicate kernel.start");
+    start=message.start;currentHarnessId=start.harness.id;
+    messages=[{role:"system",content:[{kind:"text",text:"You are omega.dev's initial SWE runner. Inspect repository guidance and project files before editing. Use file SHA interlocks, isolated processes, and authoritative project verification. Preserve unrelated work. Continue until the objective is complete and verified; if a tool reports stale-read, re-read, merge, and retry."}]},{role:"user",content:[{kind:"text",text:start.session.objective}]}];
+    emit({kind:"runner.ready",harnessId:currentHarnessId});modelRequest();return;
+  }
+  if(message?.kind==="kernel.reply"){
+    const done=pending.get(message.reply.requestId);if(done){pending.delete(message.reply.requestId);done(message.reply)}return;
+  }
+  if(message?.kind==="kernel.event"){
+    if(message.event.kind==="model.event")modelEvent(message.event.event);
+    else if(message.event.kind==="harness.updated")currentHarnessId=message.event.update.activeHarnessId;
+    else if(message.event.kind==="daemon.shutdown")finish("cancelled");
+  }
+}
 process.stdin.setEncoding("utf8");
-process.stdin.on("data",chunk=>{buffer+=chunk;for(;;){const newline=buffer.indexOf("\n");if(newline<0)return;const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);try{const envelope=JSON.parse(line);if(envelope.protocol==="omega-runner-jsonl"&&envelope.version===1&&envelope.message?.kind==="kernel.start"){process.stdout.write(JSON.stringify({protocol:"omega-runner-jsonl",version:1,message:{kind:"runner.ready",harnessId:envelope.message.start.harness.id}})+"\n");}}catch{process.stdout.write(JSON.stringify({protocol:"omega-runner-jsonl",version:1,message:{kind:"runner.protocol-error",error:{kind:"protocol-error",protocol:"runner-jsonl",message:"invalid kernel JSONL",recoverable:false,callerAction:"abort"}}})+"\n");}}});`;
+process.stdin.on("data",chunk=>{buffer+=chunk;for(;;){const newline=buffer.indexOf("\n");if(newline<0)return;const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);try{accept(JSON.parse(line))}catch(error){emit({kind:"runner.protocol-error",error:{kind:"protocol-error",protocol:"runner-jsonl",message:error instanceof Error?error.message:"invalid kernel JSONL",recoverable:false,callerAction:"abort"}})}}});`;
 
 const INITIAL_TOOLS: readonly { readonly name: string; readonly capabilities: readonly CapabilityKind[] }[] = [
   { name: "file.read", capabilities: ["read-files"] },
@@ -36,7 +122,7 @@ const INITIAL_TOOLS: readonly { readonly name: string; readonly capabilities: re
   { name: "harness.status", capabilities: [] },
 ];
 
-export const createInitialHarness: CreateInitialHarness = async (project, objects, projects) => {
+export const createInitialHarness: CreateInitialHarness = async (project, objects, _projects) => {
   if (project.activeHarnessId !== null) {
     return conflict("project-active-harness", "null", project.activeHarnessId);
   }
@@ -78,7 +164,7 @@ export const createInitialHarness: CreateInitialHarness = async (project, object
     }
     tools.push(component.value);
   }
-  const createdAt = new Date().toISOString() as Timestamp;
+  const createdAt = project.createdAt as Timestamp;
   const body = {
     projectId: project.id,
     alias: `${project.displayName}@1`,
@@ -98,12 +184,7 @@ export const createInitialHarness: CreateInitialHarness = async (project, object
   if (!stored.ok) {
     return stored;
   }
-  const manifest: HarnessManifest = { id: `harness_${stored.value}` as HarnessId, ...body };
-  const activated = await projects.compareAndSetActiveHarness(project.id, null, manifest.id);
-  if (!activated.ok) {
-    return activated;
-  }
-  return { ok: true, value: manifest };
+  return { ok: true, value: { id: `harness_${stored.value}` as HarnessId, ...body } };
 };
 
 async function materializeComponent(

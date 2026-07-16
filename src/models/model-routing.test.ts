@@ -164,7 +164,7 @@ describe("model routing", () => {
       timeoutMs: 10_000,
     });
     expect(captured[0]?.modelSettings).toMatchObject({
-      provider: { allow_fallbacks: true, require_parameters: true, data_collection: "deny" },
+      provider: { allow_fallbacks: true, require_parameters: true, data_collection: "allow" },
       usage: { include: true },
     });
     expect(events).toEqual([

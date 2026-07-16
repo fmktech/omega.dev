@@ -40,7 +40,7 @@ export type OpenRouterBoundaryChunk =
   | { readonly type: "finish-step"; readonly responseId: string; readonly usage: LanguageModelUsage; readonly providerMetadata: ProviderMetadata | undefined }
   | { readonly type: "finish"; readonly finishReason: string; readonly totalUsage: LanguageModelUsage }
   | { readonly type: "abort" }
-  | { readonly type: "error"; readonly error: Error };
+  | { readonly type: "error"; readonly error: unknown };
 
 type AiStream = {
   readonly stream: AsyncIterable<OpenRouterBoundaryChunk>;
@@ -273,7 +273,7 @@ function rateLimitDelay(headers: Record<string, string> | undefined): DurationMs
     : null;
 }
 
-function providerError(error: object, providerId: string): ModelError {
+function providerError(error: unknown, providerId: string): ModelError {
   if (APICallError.isInstance(error)) {
     if (error.statusCode === 429) {
       return {
@@ -297,6 +297,20 @@ function providerError(error: object, providerId: string): ModelError {
       kind: "provider-unavailable",
       providerId,
       reason: "Provider request was aborted or timed out",
+      recoverable: true,
+      callerAction: "choose-different-route",
+    };
+  }
+  const detail = error instanceof Error
+    ? error.message
+    : error !== null && typeof error === "object"
+      ? readString(error, "message")
+      : null;
+  if (detail !== null) {
+    return {
+      kind: "provider-unavailable",
+      providerId,
+      reason: detail.slice(0, 500),
       recoverable: true,
       callerAction: "choose-different-route",
     };
@@ -348,9 +362,16 @@ const AI_SDK_BOUNDARY: OpenRouterBoundary = {
       compatibility: "strict",
     });
     const model = provider.chat(request.modelId, request.modelSettings);
+    const instructions = request.messages
+      .filter((message) => message.role === "system")
+      .map((message) => typeof message.content === "string" ? message.content : "")
+      .filter((message) => message.length > 0)
+      .join("\n\n");
+    const messages = request.messages.filter((message) => message.role !== "system");
     const result = streamText({
       model,
-      messages: [...request.messages],
+      messages: [...messages],
+      ...(instructions.length === 0 ? {} : { instructions }),
       tools: request.tools,
       maxOutputTokens: request.maxOutputTokens,
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
@@ -396,7 +417,7 @@ const AI_SDK_BOUNDARY: OpenRouterBoundary = {
             yield { type: "abort" };
             break;
           case "error":
-            yield { type: "error", error: part.error instanceof Error ? part.error : new Error("Provider stream failed") };
+            yield { type: "error", error: part.error };
             break;
           default:
             break;
@@ -503,7 +524,7 @@ export function createOpenRouterAdapter(boundary: OpenRouterBoundary = AI_SDK_BO
               yield {
                 kind: "failed",
                 streamId: request.streamId,
-                error: providerError(part.error instanceof Error ? part.error : new Error("Provider stream failed"), request.provider.providerId),
+                error: providerError(part.error, request.provider.providerId),
                 partialArtifactId: null,
               };
               return;

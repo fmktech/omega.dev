@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,16 +68,43 @@ describe("harness runtime", () => {
       "subagent.observe", "knowledge.catalog", "knowledge.read", "knowledge.write", "marketplace.search", "marketplace.install",
       "harness.evolve", "harness.status",
     ]);
+    const beforeActivation = await fixture.projects.getProject(fixture.project.id);
+    const beforeIndex = await fixture.harnesses.listProjectHarnesses(fixture.project.id, { cursor: null, limit: 10 });
+    expect(beforeActivation.ok && beforeActivation.value).toMatchObject({ activeHarnessId: null });
+    expect(beforeIndex.ok && beforeIndex.value).toMatchObject({ items: [] });
+
+    expect((await fixture.harnesses.putHarness(created.value)).ok).toBe(true);
+    expect((await fixture.projects.compareAndSetActiveHarness(fixture.project.id, null, created.value.id)).ok).toBe(true);
     const active = await fixture.harnesses.getActiveHarness(fixture.project.id);
     const listed = await fixture.harnesses.listProjectHarnesses(fixture.project.id, { cursor: null, limit: 10 });
     expect(active.ok && active.value.id).toBe(created.value.id);
     expect(listed.ok && listed.value.items.map((manifest) => manifest.id)).toEqual([created.value.id]);
 
-    const repeated = await createInitialHarness({ ...fixture.project, activeHarnessId: created.value.id }, fixture.objects, fixture.projects);
-    expect(repeated.ok).toBe(false);
-    if (!repeated.ok) {
-      expect(repeated.error.kind).toBe("conflict");
-    }
+    const repeated = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(repeated.ok && repeated.value.id).toBe(created.value.id);
+  });
+
+  it("ships a bootstrap runner that starts a model turn and completes a no-tool response", async () => {
+    const fixture = await repositoryFixture("bootstrap-loop");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    expect(runner?.entrypoint.startsWith("inline-base64:")).toBe(true);
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) } })}\n`);
+    await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.ready", harnessId: created.value.id } });
+    const modelStart = await lines.next();
+    expect(modelStart).toMatchObject({ message: { kind: "runner.request", request: { kind: "model.start" } } });
+    const requestId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    const route = modelRoute();
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.reply", reply: { kind: "model.started", requestId, result: { ok: true, value: { streamId: "stream-bootstrap", route } } } } })}\n`);
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.event", event: { kind: "model.event", event: { kind: "completed", completion: modelCompletion(route) } } } })}\n`);
+    await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.request", request: { kind: "session.complete", outcome: "succeeded" } } });
+    child.kill("SIGTERM");
   });
 
   it("stores immutable lineage, rejects cross-project parents, and detects activation CAS conflicts", async () => {
@@ -88,6 +116,8 @@ describe("harness runtime", () => {
     if (!initial.ok || !foreignInitial.ok) {
       return;
     }
+    await first.harnesses.putHarness(initial.value);
+    await first.projects.compareAndSetActiveHarness(first.project.id, null, initial.value.id);
     const storedInitial = await first.harnesses.getHarness(initial.value.id);
     expect(storedInitial.ok).toBe(true);
     if (!storedInitial.ok) {
@@ -117,6 +147,8 @@ describe("harness runtime", () => {
     if (!initial.ok) {
       return;
     }
+    await fixture.harnesses.putHarness(initial.value);
+    await fixture.projects.compareAndSetActiveHarness(fixture.project.id, null, initial.value.id);
     const candidate = candidateHarness(initial.value, [initial.value.id], "candidate");
     expect((await fixture.harnesses.putHarness(candidate)).ok).toBe(true);
     const activation = createHarnessActivationService(fixture.projects, fixture.harnesses);
@@ -149,12 +181,32 @@ describe("harness runtime", () => {
     if (!started.ok) {
       return;
     }
+    expect(supervisor.startedSpecs[0]?.executable).toBe("node");
+    expect(supervisor.startedSpecs[0]?.sandbox.cpuTimeLimitMs).toBeLessThanOrEqual(1_800_000);
     const received = host.receive("session-runner" as SessionId)[Symbol.asyncIterator]();
     expect((await received.next()).value?.message.kind).toBe("runner.ready");
 
     supervisor.emit('{not-json}\n');
     const malformed = await received.next();
     expect(malformed.value?.message.kind).toBe("runner.protocol-error");
+
+    supervisor.emit(JSON.stringify({
+      protocol: "omega-runner-jsonl",
+      version: 1,
+      message: {
+        kind: "runner.request",
+        request: {
+          kind: "process.start",
+          requestId: "request-hostile",
+          spec: {
+            sessionId: "session-runner",
+            harnessId: initial.value.id,
+          },
+        },
+      },
+    }) + "\n");
+    const hostile = await received.next();
+    expect(hostile.value?.message.kind).toBe("runner.protocol-error");
 
     supervisor.emit(JSON.stringify({
       protocol: "omega-runner-jsonl",
@@ -197,7 +249,22 @@ describe("harness runtime", () => {
     supervisor.emit(JSON.stringify({
       protocol: "omega-runner-jsonl",
       version: 1,
-      message: { kind: "runner.request", request: { kind: "model.start", requestId: "request-stale", request: { harnessId: initial.value.id } } },
+      message: {
+        kind: "runner.request",
+        request: {
+          kind: "model.start",
+          requestId: "request-stale",
+          request: {
+            sessionId: "session-runner",
+            harnessId: initial.value.id,
+            role: "main-coder",
+            messages: [],
+            tools: [],
+            maxOutputTokens: 1,
+            abortAfterMs: 1,
+          },
+        },
+      },
     }) + "\n");
     const afterStale = received.next();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -460,6 +527,64 @@ function runnerStart(harness: HarnessManifest, workspace: WorkspaceRecord) {
     createdAt: NOW,
   };
   return { session, workspace, harness, handoffArtifactId: null };
+}
+
+function modelRoute() {
+  return {
+    role: "main-coder" as const,
+    providerId: "scripted",
+    modelId: "bootstrap-test",
+    variant: null,
+    servingProvider: "scripted",
+    quantization: null,
+    reasoning: "off" as const,
+    temperature: 0,
+    topP: null,
+    seed: 1,
+    contextLimit: 4_096 as TokenCount,
+    outputLimit: 1_024 as TokenCount,
+    equivalentListPrice: { inputUsdMicrosPerMillionTokens: 0 as UsdMicros, cachedInputUsdMicrosPerMillionTokens: 0 as UsdMicros, outputUsdMicrosPerMillionTokens: 0 as UsdMicros },
+  };
+}
+
+function modelCompletion(route: ReturnType<typeof modelRoute>) {
+  return {
+    streamId: "stream-bootstrap",
+    providerGenerationId: "generation-bootstrap",
+    route,
+    content: [{ kind: "text" as const, text: "done" }],
+    usage: { inputTokens: 1 as TokenCount, cachedInputTokens: 0 as TokenCount, reasoningTokens: 0 as TokenCount, outputTokens: 1 as TokenCount, costUsdMicros: 0 as UsdMicros },
+    startedAt: NOW,
+    firstTokenAt: NOW,
+    completedAt: NOW,
+    finishReason: "stop" as const,
+  };
+}
+
+function lineReader(stream: NodeJS.ReadableStream): { next(): Promise<JsonObject> } {
+  let buffer = "";
+  const queued: JsonObject[] = [];
+  const waiters: ((value: JsonObject) => void)[] = [];
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    for (;;) {
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      const value = JSON.parse(line) as JsonObject;
+      const waiter = waiters.shift();
+      if (waiter === undefined) queued.push(value);
+      else waiter(value);
+    }
+  });
+  return {
+    next() {
+      const value = queued.shift();
+      return value === undefined ? new Promise((resolve) => waiters.push(resolve)) : Promise.resolve(value);
+    },
+  };
 }
 
 function completion(processId: ProcessId): ProcessCompletion {

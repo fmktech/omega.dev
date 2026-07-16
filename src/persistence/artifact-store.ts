@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { link, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type {
@@ -18,6 +18,7 @@ import type {
 
 const LOCK_RETRIES = 400;
 const LOCK_RETRY_MS = 5;
+const MALFORMED_LOCK_STALE_MS = 250;
 
 export function safeStorageKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -84,13 +85,23 @@ export async function withFileLock<T>(resourcePath: string, operation: () => Pro
   await mkdir(dirname(lockPath), { recursive: true });
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   for (let attempt = 0; attempt < LOCK_RETRIES; attempt += 1) {
+    const ownerPath = `${lockPath}.${process.pid}.${randomUUID()}.owner`;
     try {
-      handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      handle = await open(ownerPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
       await handle.writeFile(`${process.pid}\n`, "utf8");
+      await handle.sync();
+      await link(ownerPath, lockPath);
+      await rm(ownerPath);
       break;
     } catch (error) {
+      await handle?.close().catch(() => undefined);
+      handle = null;
+      await rm(ownerPath, { force: true }).catch(() => undefined);
       if (!isNodeError(error) || error.code !== "EEXIST") {
         throw error;
+      }
+      if (await reclaimDeadOwnerLock(lockPath)) {
+        continue;
       }
       if (attempt === LOCK_RETRIES - 1) {
         const busy = new Error(`Timed out acquiring lock for ${resourcePath}`) as NodeJS.ErrnoException;
@@ -108,6 +119,61 @@ export async function withFileLock<T>(resourcePath: string, operation: () => Pro
   } finally {
     await handle.close().catch(() => undefined);
     await rm(lockPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function reclaimDeadOwnerLock(lockPath: string): Promise<boolean> {
+  let owner: string;
+  try {
+    owner = await readFile(lockPath, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return true;
+    throw error;
+  }
+  const match = /^([1-9]\d*)\n$/u.exec(owner);
+  const pid = match === null ? null : Number(match[1]);
+  if (pid !== null && (!Number.isSafeInteger(pid) || pid <= 0 || processIsAlive(pid))) return false;
+  if (pid === null) {
+    const malformed = await stat(lockPath);
+    if (Date.now() - malformed.mtimeMs < MALFORMED_LOCK_STALE_MS) return false;
+  }
+
+  // A hard-link claim serializes competing reclaimers without replacing the
+  // original O_EXCL lock. Once claimed, the dead owner cannot release it and
+  // no new live owner can acquire the primary path before it is removed.
+  const claimPath = `${lockPath}.reclaim`;
+  try {
+    await link(lockPath, claimPath);
+  } catch (error) {
+    if (isNodeError(error) && (error.code === "EEXIST" || error.code === "ENOENT")) return false;
+    throw error;
+  }
+  try {
+    const [locked, claimed, claimedOwner] = await Promise.all([
+      stat(lockPath),
+      stat(claimPath),
+      readFile(claimPath, "utf8"),
+    ]);
+    if (locked.dev !== claimed.dev || locked.ino !== claimed.ino || claimedOwner !== owner
+      || (pid !== null && processIsAlive(pid))) {
+      return false;
+    }
+    await rm(lockPath);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  } finally {
+    await rm(claimPath, { force: true }).catch(() => undefined);
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(isNodeError(error) && error.code === "ESRCH");
   }
 }
 

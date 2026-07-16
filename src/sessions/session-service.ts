@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type {
   ArtifactId,
+  ArtifactRecord,
   CapabilityDeniedError,
   ChildSessionRecord,
   CreateSessionService,
@@ -93,6 +94,7 @@ export const createSessionService: CreateSessionService = (options) => {
         return appended;
       }
       if (appended.error.kind !== "conflict") return appended;
+      if (appended.error.resource === "session-terminal") return appended;
     }
     return conflict("session-event-sequence", "available append slot", "concurrent writers did not settle");
   }
@@ -121,6 +123,7 @@ export const createSessionService: CreateSessionService = (options) => {
       await options.runners.stop(header.id, "session event persistence failed");
       return runnerEvent;
     }
+    options.runnerRequests.start(header.id);
     return options.repository.get(header.id);
   }
 
@@ -159,17 +162,12 @@ export const createSessionService: CreateSessionService = (options) => {
       && event.payload.child.sessionId === session.header.id);
     if (alreadyCompleted) return { ok: true, value: undefined };
 
-    const resultArtifact = await createChildResultArtifact(options.repository, options.objects, session);
-    if (!resultArtifact.ok) return resultArtifact;
     const childArtifactEvents = await readAllEvents(options.repository, session.header.id);
     if (!childArtifactEvents.ok) return childArtifactEvents;
-    if (!childArtifactEvents.value.some((event) => event.payload.kind === "artifact.recorded"
-      && event.payload.artifact.id === resultArtifact.value.id)) {
-      const artifactEvent = await append(session.header.id, {
-        kind: "artifact.recorded",
-        artifact: resultArtifact.value,
-      }, session.header.initialHarnessId);
-      if (!artifactEvent.ok) return artifactEvent;
+    const resultArtifact = childArtifactEvents.value.find((event) => event.payload.kind === "artifact.recorded"
+      && event.payload.artifact.metadata["purpose"] === "child-result");
+    if (resultArtifact?.payload.kind !== "artifact.recorded") {
+      return validation("Child result artifact must be recorded before terminal completion", "sessionId");
     }
     const child: ChildSessionRecord = {
       ...spawned.payload.child,
@@ -178,16 +176,41 @@ export const createSessionService: CreateSessionService = (options) => {
     const completed = await append(parentSessionId, {
       kind: "child.completed",
       child,
-      resultArtifactId: resultArtifact.value.id,
+      resultArtifactId: resultArtifact.payload.artifact.id,
     }, spawned.harnessId);
     if (!completed.ok) return completed;
     const envelope: KernelToRunnerEnvelope = {
       protocol: PROTOCOL,
       version: PROTOCOL_VERSION,
-      message: { kind: "kernel.event", event: { kind: "child.completed", child, resultArtifactId: resultArtifact.value.id } },
+      message: { kind: "kernel.event", event: { kind: "child.completed", child, resultArtifactId: resultArtifact.payload.artifact.id } },
     };
     await options.runners.send(parentSessionId, envelope);
     return { ok: true, value: undefined };
+  }
+
+  async function prepareChildResult(
+    session: SessionRecord,
+    outcome: SessionOutcome,
+  ): Promise<Result<ArtifactRecord | null, SessionError>> {
+    if (session.header.parentSessionId === null) return { ok: true, value: null };
+    const projected: SessionRecord = {
+      ...session,
+      state: outcome === "succeeded" ? "completed" : outcome,
+      outcome,
+      completedAt: now(),
+    };
+    const artifact = await createChildResultArtifact(options.repository, options.objects, projected);
+    if (!artifact.ok) return artifact;
+    const events = await readAllEvents(options.repository, session.header.id);
+    if (!events.ok) return events;
+    if (!events.value.some((event) => event.payload.kind === "artifact.recorded" && event.payload.artifact.id === artifact.value.id)) {
+      const recorded = await append(session.header.id, {
+        kind: "artifact.recorded",
+        artifact: artifact.value,
+      }, session.header.initialHarnessId);
+      if (!recorded.ok) return recorded;
+    }
+    return { ok: true, value: artifact.value };
   }
 
   async function finalize(
@@ -202,9 +225,20 @@ export const createSessionService: CreateSessionService = (options) => {
       const repaired = await ensureParentCompletion(session);
       return repaired.ok ? { ok: true, value: session } : repaired;
     }
+    const prepared = await prepareChildResult(session, outcome);
+    if (!prepared.ok) return prepared;
     if (shouldStopRunner) await stopRunner(session, `session ${outcome}`);
     const completed = await append(session.header.id, { kind: "session.completed", outcome }, session.header.initialHarnessId);
-    if (!completed.ok) return completed;
+    if (!completed.ok) {
+      if (completed.error.kind !== "conflict") return completed;
+      const raced = await options.repository.get(session.header.id);
+      if (!raced.ok) return raced;
+      if (raced.value.outcome !== outcome) {
+        return conflict("session-outcome", outcome, raced.value.outcome ?? "non-terminal");
+      }
+      const repaired = await ensureParentCompletion(raced.value);
+      return repaired.ok ? raced : repaired;
+    }
     const current = await options.repository.get(session.header.id);
     if (!current.ok) return current;
     const parent = await ensureParentCompletion(current.value);
@@ -405,6 +439,11 @@ export const createSessionService: CreateSessionService = (options) => {
       return session.ok ? finalize(session.value, outcome, true) : session;
     },
 
+    async completeFromRunner(sessionId, outcome) {
+      const session = await options.repository.get(sessionId);
+      return session.ok ? finalize(session.value, outcome, false) : session;
+    },
+
     async cancel(sessionId, reason) {
       const session = await options.repository.get(sessionId);
       if (!session.ok) return session;
@@ -431,35 +470,66 @@ export const createSessionService: CreateSessionService = (options) => {
       return createHandoffFor(sessionId);
     },
 
-    async *subscribe(sessionId, afterSequence) {
-      if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) return;
+    recordRunnerEvent(sessionId, payload, harnessId) {
+      return append(sessionId, payload, harnessId);
+    },
+
+    publishRunnerEvent(event) {
+      publish(event);
+    },
+
+    subscribe(sessionId, afterSequence) {
       const queue = new LiveQueue();
       const listeners = subscriptions.get(sessionId) ?? new Set<LiveQueue>();
-      listeners.add(queue);
-      subscriptions.set(sessionId, listeners);
-      let cursor = afterSequence;
-      try {
-        while (true) {
-          const persisted = await options.repository.read(sessionId, cursor, LIVE_READ_LIMIT);
-          if (!persisted.ok) return;
-          for (const event of persisted.value) {
-            cursor = Math.max(cursor, event.sequence);
-            yield { kind: "session-event", sessionId, event };
+      let iterator: AsyncIterator<LiveEventEnvelope> | null = null;
+
+      async function* stream(): AsyncIterable<LiveEventEnvelope> {
+        if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) return;
+        listeners.add(queue);
+        subscriptions.set(sessionId, listeners);
+        let cursor = afterSequence;
+        try {
+          while (true) {
+            const persisted = await options.repository.read(sessionId, cursor, LIVE_READ_LIMIT);
+            if (!persisted.ok) return;
+            for (const event of persisted.value) {
+              cursor = Math.max(cursor, event.sequence);
+              yield { kind: "session-event", sessionId, event };
+            }
+            if (persisted.value.length < LIVE_READ_LIMIT) break;
           }
-          if (persisted.value.length < LIVE_READ_LIMIT) break;
+          while (true) {
+            const event = await queue.next();
+            if (event === null) return;
+            if (event.kind === "session-event" && event.event.sequence <= cursor) continue;
+            if (event.kind === "session-event") cursor = event.event.sequence;
+            yield event;
+          }
+        } finally {
+          queue.close();
+          listeners.delete(queue);
+          if (listeners.size === 0) subscriptions.delete(sessionId);
         }
-        while (true) {
-          const event = await queue.next();
-          if (event === null) return;
-          if (event.kind === "session-event" && event.event.sequence <= cursor) continue;
-          if (event.kind === "session-event") cursor = event.event.sequence;
-          yield event;
-        }
-      } finally {
-        queue.close();
-        listeners.delete(queue);
-        if (listeners.size === 0) subscriptions.delete(sessionId);
       }
+
+      return {
+        [Symbol.asyncIterator]() {
+          const source = iterator ?? stream()[Symbol.asyncIterator]();
+          iterator = source;
+          return {
+            next: () => source.next(),
+            async return() {
+              queue.close();
+              return source.return === undefined ? { done: true, value: undefined } : source.return();
+            },
+            async throw(error?: unknown) {
+              queue.close();
+              if (source.throw !== undefined) return source.throw(error);
+              throw error;
+            },
+          };
+        },
+      };
     },
   };
 };
@@ -490,7 +560,8 @@ function childDenied(reason: string): { readonly ok: false; readonly error: Capa
 }
 
 function runnerStartupError(error: HarnessError | ProcessError): HarnessError {
-  if (error.kind === "validation" || error.kind === "capability-denied" || error.kind === "io-error") return error;
+  if (error.kind === "validation" || error.kind === "capability-denied" || error.kind === "io-error"
+    || error.kind === "protocol-error") return error;
   return {
     kind: "protocol-error",
     protocol: "runner-jsonl",

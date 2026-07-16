@@ -190,15 +190,16 @@ function createClient(baseUrl: URL, bearerToken: string): OmegaClient {
       return parseClientResponse(text, request.requestId);
     },
 
-    async *events(sessionId: SessionId, afterSequence: number): AsyncIterable<LiveEventEnvelope> {
+    events(sessionId: SessionId, afterSequence: number): AsyncIterable<LiveEventEnvelope> {
       if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
         throw new ClientTransportError("configuration", "afterSequence must be a non-negative integer");
       }
       const controller = new AbortController();
-      let lastPersistedSequence = afterSequence;
-      let reconnectAttempt = 0;
-      try {
-        while (!controller.signal.aborted) {
+      async function* generate(): AsyncGenerator<LiveEventEnvelope, void, undefined> {
+        let lastPersistedSequence = afterSequence;
+        let reconnectAttempt = 0;
+        try {
+          while (!controller.signal.aborted) {
           const url = new URL(`/api/v1/sessions/${encodeURIComponent(sessionId)}/events`, baseUrl);
           url.searchParams.set("afterSequence", String(lastPersistedSequence));
           try {
@@ -237,14 +238,30 @@ function createClient(baseUrl: URL, bearerToken: string): OmegaClient {
               throw error;
             }
           }
-          if (!controller.signal.aborted) {
-            await delay(Math.min(25 * 2 ** reconnectAttempt, 1_000), controller.signal);
-            reconnectAttempt += 1;
+            if (!controller.signal.aborted) {
+              await delay(Math.min(25 * 2 ** reconnectAttempt, 1_000), controller.signal);
+              reconnectAttempt += 1;
+            }
           }
+        } finally {
+          controller.abort();
         }
-      } finally {
-        controller.abort();
       }
+      const source = generate();
+      const iterator: AsyncIterator<LiveEventEnvelope> = {
+        next: () => source.next(),
+        async return(value?: unknown) {
+          // Abort before delegating. AsyncGenerator.return() alone queues behind
+          // an outstanding next(), which leaves an idle SSE fetch hung.
+          controller.abort();
+          return source.return(value as void);
+        },
+        async throw(error?: unknown) {
+          controller.abort();
+          return source.throw(error);
+        },
+      };
+      return { [Symbol.asyncIterator]: () => iterator };
     },
   };
 }

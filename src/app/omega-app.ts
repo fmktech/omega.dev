@@ -19,9 +19,13 @@ import type {
   CreateOmegaApplication,
   DurationMs,
   EvolutionError,
+  HarnessError,
+  HarnessManifest,
+  HarnessRepository,
   ModelRouteSignature,
   ObjectStore,
   ProjectRepository,
+  ProjectRecord,
   SessionRepository,
   SessionEvent,
   SessionService,
@@ -51,6 +55,8 @@ import { createFileSessionRepository } from "../persistence/session-repository.j
 import { createExecutionPolicy } from "../policy/policy-engine.js";
 import { createProcessRuntime } from "../process/process-supervisor.js";
 import { createSessionService } from "../sessions/session-service.js";
+import { createCoordinatedActivationService, recoverPersistedSessions } from "./lifecycle.js";
+import { createRunnerProtocolDispatcher } from "./runner-protocol.js";
 
 const encoder = new TextEncoder();
 
@@ -160,6 +166,23 @@ type Check = { readonly path: string; readonly equals?: string; readonly contain
 
 function launcherIo(operation: string): EvolutionError {
   return { kind: "io-error", operation, code: null, recoverable: false, callerAction: "propagate" };
+}
+
+function launcherCancelled(): Result<never, EvolutionError> {
+  return {
+    ok: false,
+    error: {
+      kind: "validation",
+      message: "Benchmark evaluation cancelled",
+      field: "signal",
+      recoverable: true,
+      callerAction: "fix-request",
+    },
+  };
+}
+
+function benchmarkAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted ?? false;
 }
 
 async function objectBytes(objects: ObjectStore, hash: Parameters<ObjectStore["get"]>[0]): Promise<Result<Uint8Array, EvolutionError>> {
@@ -354,7 +377,8 @@ async function observedBenchmark(
 /** Trusted boundary: fixture/public inputs reach the pinned session; verifier bytes never do. */
 export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencies): BenchmarkRunLauncher {
   return {
-    async execute(request: BenchmarkExecutionRequest) {
+    async execute(request: BenchmarkExecutionRequest, signal?: AbortSignal) {
+      if (benchmarkAborted(signal)) return launcherCancelled();
       if (request.privateTask.taskId !== request.task.id) {
         return {
           ok: false,
@@ -369,12 +393,17 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
       }
       const fixture = await objectBytes(options.objects, request.task.fixtureObjectHash);
       if (!fixture.ok) return fixture;
+      if (benchmarkAborted(signal)) return launcherCancelled();
       const verifier = await objectBytes(options.objects, request.privateTask.verifierObjectHash);
       if (!verifier.ok) return verifier;
       const negativeInvariants = await objectBytes(options.objects, request.privateTask.negativeInvariantObjectHash);
       if (!negativeInvariants.ok) return negativeInvariants;
       const materialized = await materializeFixture(options.root, fixture.value);
       if (!materialized.ok) return materialized;
+      if (benchmarkAborted(signal)) {
+        await rm(materialized.value, { recursive: true, force: true }).catch(() => undefined);
+        return launcherCancelled();
+      }
       const startedAt = timestamp();
       try {
         const registered = await options.projects.registerBenchmarkWorkspace(
@@ -408,12 +437,36 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
         });
         if (!session.ok) return session;
         let terminal = session.value;
+        let abortCancellation: ReturnType<typeof options.sessions.cancel> | null = null;
+        const cancelForAbort = (): ReturnType<typeof options.sessions.cancel> => {
+          abortCancellation ??= options.sessions.cancel(terminal.header.id, "benchmark evaluation cancelled");
+          return abortCancellation;
+        };
+        const onAbort = (): void => { void cancelForAbort(); };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (benchmarkAborted(signal)) onAbort();
+        try {
         const deadline = Date.now() + Number(request.task.budget.wallTimeMs);
-        while (terminal.outcome === null && Date.now() < deadline) {
+        while (terminal.outcome === null && Date.now() < deadline && !benchmarkAborted(signal)) {
           await new Promise((resolve) => setTimeout(resolve, 10));
           const observed = await options.repository.get(terminal.header.id);
           if (!observed.ok) return observed;
           terminal = observed.value;
+        }
+        if (benchmarkAborted(signal)) {
+          const cancelled = await cancelForAbort();
+          if (!cancelled.ok) {
+            switch (cancelled.error.kind) {
+              case "policy-denied":
+              case "process-not-running":
+              case "process-interrupted":
+              case "unsupported":
+                return { ok: false, error: { kind: "validation", message: `Benchmark cancellation failed: ${cancelled.error.kind}`, field: "sessionId", recoverable: true, callerAction: "fix-request" } };
+              default:
+                return { ok: false, error: cancelled.error };
+            }
+          }
+          return launcherCancelled();
         }
         if (terminal.outcome === null) {
           const cancelled = await options.sessions.cancel(terminal.header.id, "benchmark wall-time budget exceeded");
@@ -462,6 +515,9 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
             completedAt,
           },
         };
+        } finally {
+          signal?.removeEventListener("abort", onAbort);
+        }
       } catch {
         return { ok: false, error: launcherIo("execute-benchmark") };
       } finally {
@@ -481,7 +537,9 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
   const runtime = createProcessRuntime({ config: config.processes, environment, projects, sessions: sessionRepository, objects, policy });
   const harnesses = createHarnessRepository(root, objects, projects);
   const runners = createRunnerHost(runtime.processes, harnesses);
-  const activation = createHarnessActivationService(projects, harnesses);
+  const baseActivation = createHarnessActivationService(projects, harnesses);
+  let context: OmegaContext;
+  const runnerRequests = createRunnerProtocolDispatcher(() => context);
   const sessions = createSessionService({
     config: config.sessions,
     repository: sessionRepository,
@@ -492,13 +550,28 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     models,
     policy,
     objects,
+    runnerRequests,
+  });
+  const activation = createCoordinatedActivationService({
+    activation: baseActivation,
+    repository: sessionRepository,
+    sessions,
+    runners,
   });
   const knowledge = createKnowledgeService(root, objects);
-  const marketplace = createMarketplaceService(root, objects);
+  const marketplace = createMarketplaceService({ root, objects, harnesses, activation });
   const launcher = createBenchmarkRunLauncher({ root, objects, projects, sessions, repository: sessionRepository, config });
   const benchmarks = createBenchmarkService({ root, objects, sessions, harnesses, activation, launcher });
-  const evolution = createEvolutionService({ root, sessions, harnesses, benchmarks, activation });
-  return {
+  const evolution = createEvolutionService({
+    root,
+    objects,
+    repository: sessionRepository,
+    sessions,
+    harnesses,
+    benchmarks,
+    activation,
+  });
+  context = {
     config,
     objects,
     projects,
@@ -510,12 +583,32 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     sessions,
     harnesses,
     runners,
+    runnerRequests,
     activation,
     knowledge,
     marketplace,
     evolution,
     benchmarks,
   };
+  return context;
+}
+
+export async function ensureProjectHarness(
+  project: ProjectRecord,
+  objects: ObjectStore,
+  projects: ProjectRepository,
+  harnesses: HarnessRepository,
+): Promise<Result<HarnessManifest, HarnessError>> {
+  if (project.activeHarnessId !== null) return harnesses.getHarness(project.activeHarnessId);
+  const created = await createInitialHarness(project, objects, projects);
+  if (!created.ok) return created;
+  const indexed = await harnesses.putHarness(created.value);
+  if (!indexed.ok) return indexed;
+  const activated = await projects.compareAndSetActiveHarness(project.id, null, indexed.value.id);
+  if (activated.ok) return { ok: true, value: indexed.value };
+  const refreshed = await projects.getProject(project.id);
+  if (refreshed.ok && refreshed.value.activeHarnessId === indexed.value.id) return { ok: true, value: indexed.value };
+  return activated;
 }
 
 async function execute(context: OmegaContext, request: ClientRequest): Promise<ClientResponse> {
@@ -525,12 +618,8 @@ async function execute(context: OmegaContext, request: ClientRequest): Promise<C
     case "project.register-workspace": {
       const registered = await context.projects.registerWorkspace(request.path);
       if (!registered.ok) return errorResponse(context, request, registered.error);
-      if (registered.value.project.activeHarnessId === null) {
-        const initial = await createInitialHarness(registered.value.project, context.objects, context.projects);
-        if (!initial.ok) return errorResponse(context, request, initial.error);
-        const indexed = await context.harnesses.putHarness(initial.value);
-        if (!indexed.ok) return errorResponse(context, request, indexed.error);
-      }
+      const initial = await ensureProjectHarness(registered.value.project, context.objects, context.projects, context.harnesses);
+      if (!initial.ok) return errorResponse(context, request, initial.error);
       const project = await context.projects.getProject(registered.value.project.id);
       if (!project.ok) return errorResponse(context, request, project.error);
       return {
@@ -626,6 +715,12 @@ export const createOmegaApplication: CreateOmegaApplication = (config, environme
       if (started) return { ok: true, value: undefined };
       const recovered = await context.processes.recoverOrphans();
       if (!recovered.ok) return { ok: false, error: validationFromRecovery(recovered.error) };
+      const sessionsRecovered = await recoverPersistedSessions({
+        projects: context.projects,
+        repository: context.sessionRepository,
+        sessions: context.sessions,
+      });
+      if (!sessionsRecovered.ok) return { ok: false, error: validationFromRecovery(sessionsRecovered.error) };
       started = true;
       return { ok: true, value: undefined };
     },

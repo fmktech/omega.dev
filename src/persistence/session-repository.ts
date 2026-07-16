@@ -180,6 +180,19 @@ export const createFileSessionRepository: CreateFileSessionRepository = (root, o
           return recordResult;
         }
         const current = recordResult.value;
+        if (current.outcome !== null) {
+          return {
+            ok: false,
+            error: {
+              kind: "conflict",
+              resource: "session-terminal",
+              expected: payload.kind === "session.completed" ? payload.outcome : "non-terminal session",
+              actual: current.outcome,
+              recoverable: true,
+              callerAction: "refresh-version-and-retry",
+            },
+          };
+        }
         if (current.lastSequence !== expectedSequence) {
           return {
             ok: false,

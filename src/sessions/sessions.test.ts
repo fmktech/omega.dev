@@ -119,6 +119,9 @@ class MemorySessions implements SessionRepository {
   ): Promise<Result<SessionEvent, SessionError>> {
     const record = this.records.get(id);
     if (record === undefined) return notFound("session", id);
+    if (record.outcome !== null) {
+      return conflictResult("session-terminal", payload.kind === "session.completed" ? payload.outcome : "non-terminal", record.outcome);
+    }
     if (record.lastSequence !== expectedSequence) return conflictResult("sequence", String(expectedSequence), String(record.lastSequence));
     const sequence = expectedSequence + 1;
     const event: SessionEvent = { id: reservedEventId ?? `event-${id}-${sequence}` as EventId, sequence, at: NOW, harnessId, payload };
@@ -237,6 +240,7 @@ function fixture() {
     parents: [HARNESS_ID],
   };
   const pointerWrites = { count: 0 };
+  const pumpedSessions: SessionId[] = [];
   const service = createSessionService({
     config: DEFAULT_CONFIG.sessions,
     repository,
@@ -247,8 +251,12 @@ function fixture() {
     models: modelRouter(),
     policy: allowPolicy(),
     objects,
+    runnerRequests: {
+      start(sessionId) { pumpedSessions.push(sessionId); },
+      async stop() { return; },
+    },
   });
-  return { service, repository, objects, processes, runners, project, candidate, pointerWrites };
+  return { service, repository, objects, processes, runners, project, candidate, pointerWrites, pumpedSessions };
 }
 
 describe("session service", () => {
@@ -263,6 +271,7 @@ describe("session service", () => {
     expect((f.repository.events.get(result.value.header.id) ?? []).map((event) => event.payload.kind)).toEqual([
       "session.started", "runner.started",
     ]);
+    expect(f.pumpedSessions).toEqual([result.value.header.id]);
   });
 
   it("starts an inactive pinned candidate for benchmarking without touching the active harness pointer", async () => {
@@ -301,6 +310,20 @@ describe("session service", () => {
     expect(f.project.activeHarnessId).toBe(HARNESS_ID);
     expect(f.pointerWrites.count).toBe(0);
     expect(f.runners.starts.at(-1)?.initialHarnessId).toBe(CANDIDATE_HARNESS_ID);
+  });
+
+  it("cancels an idle live subscription immediately", async () => {
+    const f = fixture();
+    const started = await f.service.startTask({ projectId: PROJECT_ID, workspaceId: WORKSPACE_ID, objective: "watch", modelRole: "main-coder" });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const iterator = f.service.subscribe(started.value.header.id, started.value.lastSequence)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await iterator.return?.();
+    await expect(Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("subscription did not cancel")), 100)),
+    ])).resolves.toMatchObject({ done: true });
   });
 
   it("resumes into a fresh linked session with exact handoff and context evidence", async () => {
@@ -406,7 +429,12 @@ describe("session service", () => {
     if (!recovered.ok) return;
     expect(recovered.value.header.id).toBe(started.value.header.id);
     expect(recovered.value.header.continuation).toBeNull();
-    expect((f.repository.events.get(started.value.header.id) ?? []).at(-1)?.payload.kind).toBe("session.recovered");
+    expect(recovered.value.outcome).toBe("failed");
+    const afterFirstRecovery = f.repository.events.get(started.value.header.id) ?? [];
+    expect(afterFirstRecovery.slice(-2).map((event) => event.payload.kind)).toEqual(["session.recovered", "session.completed"]);
+    const repeated = await recoverExistingSession(f.repository, started.value.header.id, ["orphan-1" as ProcessId]);
+    expect(repeated.ok && repeated.value.outcome).toBe("failed");
+    expect(f.repository.events.get(started.value.header.id)).toHaveLength(afterFirstRecovery.length);
   });
 });
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute, relative, sep } from "node:path";
 
 import type {
   ActionFacts,
@@ -59,6 +60,13 @@ type ActiveProcess = {
   timeout: NodeJS.Timeout | null;
 };
 
+type CompletedProcess = {
+  readonly state: ProcessState;
+  readonly result: Result<ProcessCompletion, ProcessError>;
+};
+
+const MAX_COMPLETED_PROCESSES = 256;
+
 function timestamp(): Timestamp {
   return new Date().toISOString() as Timestamp;
 }
@@ -87,8 +95,22 @@ function ioError(operation: string): IoError {
   return { kind: "io-error", operation, code: null, recoverable: true, callerAction: "retry-with-backoff" };
 }
 
+function shutdownDeadlineError(): IoError {
+  return { kind: "io-error", operation: "process.shutdown-deadline", code: "ETIMEDOUT", recoverable: false, callerAction: "abort" };
+}
+
 function hasCapability(capabilities: CapabilityEnvelope, kind: "process-input"): boolean {
   return capabilities.grants.some((grant) => grant.kind === kind);
+}
+
+function hasWholeWorkspaceFileGrant(
+  capabilities: CapabilityEnvelope,
+  kind: "read-files" | "write-files",
+): boolean {
+  return capabilities.grants.some((grant) => {
+    if (grant.kind !== kind || (grant.kind !== "read-files" && grant.kind !== "write-files")) return false;
+    return grant.pathPrefixes.some((prefix) => String(prefix) === ".");
+  });
 }
 
 function validateStartCapabilities(spec: ProcessSpec, capabilities: CapabilityEnvelope): ProcessError | null {
@@ -96,6 +118,14 @@ function validateStartCapabilities(spec: ProcessSpec, capabilities: CapabilityEn
   if (processGrant === undefined) return denied("start-process", "The session cannot start processes");
   if (processGrant.executableNames.length > 0 && !processGrant.executableNames.includes(spec.executable)) {
     return denied("start-process", `Executable ${spec.executable} is outside the capability envelope`);
+  }
+  if (!hasWholeWorkspaceFileGrant(capabilities, "read-files")) {
+    return denied("read-files", "A sandboxed process requires whole-workspace read authority");
+  }
+  if (spec.sandbox.filesystem === "workspace-read-write") {
+    if (!hasWholeWorkspaceFileGrant(capabilities, "write-files")) {
+      return denied("write-files", "A writable sandbox requires whole-workspace write authority");
+    }
   }
   if (spec.sandbox.network !== "none") {
     const networkGrant = capabilities.grants.find((grant) => grant.kind === "network-egress");
@@ -128,6 +158,12 @@ function processFacts(spec: ProcessSpec): ActionFacts {
   };
 }
 
+function pathIsWithin(root: string, target: string): boolean {
+  if (!isAbsolute(root) || !isAbsolute(target)) return false;
+  const fromRoot = relative(root, target);
+  return fromRoot === "" || (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot));
+}
+
 async function putOutput(objects: ObjectStore, chunks: readonly Buffer[]): Promise<Result<ObjectDescriptor, ProcessError>> {
   async function* output(): AsyncIterable<Uint8Array> {
     for (const chunk of chunks) yield chunk;
@@ -136,27 +172,84 @@ async function putOutput(objects: ObjectStore, chunks: readonly Buffer[]): Promi
   return result.ok ? result : { ok: false, error: ioError("object-store.put-process-output") };
 }
 
-function streamSlice(stream: ProcessStream, source: readonly Buffer[], offset: number): StreamSlice | null {
-  const all = Buffer.concat(source);
-  if (offset >= all.length) return null;
-  const data = all.subarray(Math.max(0, offset));
+function encodeStreamSlice(stream: ProcessStream, data: Buffer, offset: number): StreamSlice {
   const text = data.toString("utf8");
   const roundTrips = Buffer.from(text, "utf8").equals(data);
   return {
     stream,
-    range: { startInclusive: bytes(offset), endExclusive: bytes(all.length) },
+    range: { startInclusive: bytes(offset), endExclusive: bytes(offset + data.byteLength) },
     encoding: roundTrips ? "utf8" : "base64",
     data: roundTrips ? text : data.toString("base64"),
   };
 }
 
+function streamSlice(
+  stream: ProcessStream,
+  source: readonly Buffer[],
+  offset: number,
+  limit: number,
+): StreamSlice | null {
+  const start = Math.max(0, offset);
+  const end = start + Math.max(1, limit);
+  let cursor = 0;
+  const selected: Buffer[] = [];
+  for (const chunk of source) {
+    const chunkEnd = cursor + chunk.byteLength;
+    if (chunkEnd > start && cursor < end) {
+      selected.push(chunk.subarray(Math.max(0, start - cursor), Math.min(chunk.byteLength, end - cursor)));
+    }
+    cursor = chunkEnd;
+    if (cursor >= end) break;
+  }
+  return selected.length === 0 ? null : encodeStreamSlice(stream, Buffer.concat(selected), start);
+}
+
+async function storedStreamSlice(
+  objects: ObjectStore,
+  stream: ProcessStream,
+  descriptor: ObjectDescriptor,
+  offset: number,
+  limit: number,
+): Promise<Result<StreamSlice | null, ProcessError>> {
+  const start = Math.max(0, offset);
+  if (start >= Number(descriptor.size)) return { ok: true, value: null };
+  const end = Math.min(Number(descriptor.size), start + Math.max(1, limit));
+  const opened = await objects.get(descriptor.hash);
+  if (!opened.ok) return { ok: false, error: ioError("object-store.get-process-output") };
+  let cursor = 0;
+  const selected: Buffer[] = [];
+  for await (const chunkValue of opened.value) {
+    const chunk = Buffer.from(chunkValue);
+    const chunkEnd = cursor + chunk.byteLength;
+    if (chunkEnd > start && cursor < end) {
+      selected.push(chunk.subarray(Math.max(0, start - cursor), Math.min(chunk.byteLength, end - cursor)));
+    }
+    cursor = chunkEnd;
+    if (cursor >= end) break;
+  }
+  return {
+    ok: true,
+    value: selected.length === 0 ? null : encodeStreamSlice(stream, Buffer.concat(selected), start),
+  };
+}
+
 export function createProcessSupervisor(options: ProcessRuntimeDependencies): ProcessSupervisor {
   const active = new Map<ProcessId, ActiveProcess>();
-  const all = new Map<ProcessId, ActiveProcess>();
+  const completed = new Map<ProcessId, CompletedProcess>();
   const startsBySession = new Map<string, number>();
   const backendPromise = options.backend === undefined
     ? detectSandboxBackend(options.config, options.environment)
     : Promise.resolve({ ok: true as const, value: options.backend });
+
+  function rememberCompletion(processId: ProcessId, value: CompletedProcess): void {
+    completed.delete(processId);
+    completed.set(processId, value);
+    while (completed.size > MAX_COMPLETED_PROCESSES) {
+      const oldest = completed.keys().next().value as ProcessId | undefined;
+      if (oldest === undefined) break;
+      completed.delete(oldest);
+    }
+  }
 
   async function authorize(
     sessionId: ProcessSpec["sessionId"],
@@ -173,8 +266,14 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
     });
     if (!evaluation.ok) return policyDenied("Execution policy could not evaluate the action", "policy-evaluation-failed");
     if (evaluation.value.outcome === "allow") return null;
-    return evaluation.value.outcome === "deny"
-      ? policyDenied(evaluation.value.reason, evaluation.value.ruleId)
+    if (evaluation.value.outcome === "deny") return policyDenied(evaluation.value.reason, evaluation.value.ruleId);
+    const resolution = await waitForPolicyResolution(
+      options.policy,
+      evaluation.value.escalationId,
+      Date.parse(String(capabilities.createdAt)) + Number(capabilities.wallTimeMs),
+    );
+    return resolution === "allow"
+      ? null
       : policyDenied(evaluation.value.reason, String(evaluation.value.escalationId));
   }
 
@@ -183,16 +282,15 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
       const startedAt = Date.parse(String(record.handle.startedAt));
       const finish = async (exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> => {
         if (record.timeout !== null) clearTimeout(record.timeout);
-        active.delete(record.handle.id);
-        const stdout = await putOutput(options.objects, record.stdout);
-        if (!stdout.ok) return resolve(stdout);
-        const stderr = await putOutput(options.objects, record.stderr);
-        if (!stderr.ok) return resolve(stderr);
         const state = record.desiredTerminalState ?? "exited";
         record.state = state;
-        resolve({
-          ok: true,
-          value: {
+        const stdout = await putOutput(options.objects, record.stdout);
+        const stderr = stdout.ok ? await putOutput(options.objects, record.stderr) : stdout;
+        const result: Result<ProcessCompletion, ProcessError> = !stdout.ok
+          ? stdout
+          : !stderr.ok
+            ? stderr
+            : { ok: true, value: {
             processId: record.handle.id,
             state,
             exitCode,
@@ -200,8 +298,12 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
             durationMs: duration(Date.now() - startedAt),
             stdout: stdout.value,
             stderr: stderr.value,
-          },
-        });
+          } };
+        record.stdout.length = 0;
+        record.stderr.length = 0;
+        active.delete(record.handle.id);
+        rememberCompletion(record.handle.id, { state, result });
+        resolve(result);
       };
       record.child.process.once("exit", (code, signal) => { void finish(code, signal); });
       record.child.process.once("error", () => {
@@ -230,12 +332,24 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
           return { ok: false, error: { kind: "validation", field: "credentialEnvNames", message: `Credential ${String(name)} is not available`, recoverable: true, callerAction: "fix-request" } };
         }
       }
-      const policyError = await authorize(spec.sessionId, capabilities, processFacts(spec));
-      if (policyError !== null) return { ok: false, error: policyError };
       const session = await options.sessions.get(spec.sessionId);
       if (!session.ok) return { ok: false, error: ioError("session.get-for-process-start") };
       const workspace = await options.projects.getWorkspace(session.value.header.workspaceId);
       if (!workspace.ok) return { ok: false, error: ioError("workspace.get-for-process-start") };
+      if (!pathIsWithin(String(workspace.value.path), String(spec.cwd))) {
+        return {
+          ok: false,
+          error: {
+            kind: "validation",
+            field: "cwd",
+            message: "Working directory must remain inside the session workspace",
+            recoverable: true,
+            callerAction: "fix-request",
+          },
+        };
+      }
+      const policyError = await authorize(spec.sessionId, capabilities, processFacts(spec));
+      if (policyError !== null) return { ok: false, error: policyError };
       const backend = await backendPromise;
       if (!backend.ok) return backend;
       const processId = randomUUID() as ProcessId;
@@ -271,26 +385,40 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
         }, Number(spec.timeoutMs));
       }
       active.set(processId, record);
-      all.set(processId, record);
       startsBySession.set(String(spec.sessionId), previousStarts + 1);
       return { ok: true, value: handle };
     },
 
     async observe(processId, after) {
-      const record = all.get(processId);
-      if (record === undefined) return { ok: false, error: notRunning(processId, "interrupted") };
+      const record = active.get(processId);
+      const remembered = completed.get(processId);
+      if (record === undefined && remembered === undefined) return { ok: false, error: notRunning(processId, "interrupted") };
       const slices: StreamSlice[] = [];
       for (const stream of ["stdout", "stderr"] as const) {
         const offset = Number(after.find((entry) => entry.stream === stream)?.offset ?? 0);
-        const slice = streamSlice(stream, record[stream], offset);
-        if (slice !== null) slices.push(slice);
+        if (record !== undefined) {
+          const slice = streamSlice(stream, record[stream], offset, Number(options.config.liveChunkBytes));
+          if (slice !== null) slices.push(slice);
+          continue;
+        }
+        if (remembered === undefined) return { ok: false, error: notRunning(processId, "interrupted") };
+        if (!remembered.result.ok) return { ok: false, error: remembered.result.error };
+        const slice = await storedStreamSlice(
+          options.objects,
+          stream,
+          remembered.result.value[stream],
+          offset,
+          Number(options.config.liveChunkBytes),
+        );
+        if (!slice.ok) return slice;
+        if (slice.value !== null) slices.push(slice.value);
       }
-      return { ok: true, value: { processId, state: record.state, slices, observedAt: timestamp() } satisfies ProcessObservation };
+      return { ok: true, value: { processId, state: record?.state ?? remembered?.state ?? "interrupted", slices, observedAt: timestamp() } satisfies ProcessObservation };
     },
 
     async input(processId, input) {
       const record = active.get(processId);
-      if (record === undefined) return { ok: false, error: notRunning(processId, all.get(processId)?.state ?? "interrupted") };
+      if (record === undefined) return { ok: false, error: notRunning(processId, completed.get(processId)?.state ?? "interrupted") };
       if (!hasCapability(record.capabilities, "process-input")) return { ok: false, error: denied("process-input", "The session cannot control process input") };
       const facts: ActionFacts = { kind: "process-input", processId, input: { ...input } };
       const policyError = await authorize(record.spec.sessionId, record.capabilities, facts);
@@ -312,9 +440,12 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
     },
 
     async cancel(processId) {
-      const record = all.get(processId);
-      if (record === undefined) return { ok: false, error: notRunning(processId, "interrupted") };
-      if (!active.has(processId)) return record.completion;
+      const record = active.get(processId);
+      if (record === undefined) {
+        const remembered = completed.get(processId);
+        return remembered?.result ?? { ok: false, error: notRunning(processId, "interrupted") };
+      }
+      if (record.state !== "running") return record.completion;
       record.desiredTerminalState = "cancelled";
       const signal = await record.child.signal("SIGTERM");
       if (!signal.ok) return signal;
@@ -339,15 +470,38 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
       }
       const remaining = Math.max(0, Date.parse(String(deadline)) - Date.now());
       const settled = Promise.all(records.map((record) => record.completion));
-      await Promise.race([settled, new Promise<void>((resolve) => setTimeout(resolve, remaining))]);
-      for (const record of records) if (active.has(record.handle.id)) void record.child.signal("SIGKILL");
-      const results = await Promise.all(records.map((record) => record.completion));
+      const finishedBeforeDeadline = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), remaining);
+        void settled.then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+      if (!finishedBeforeDeadline) {
+        for (const record of records) if (active.has(record.handle.id)) void record.child.signal("SIGKILL");
+        return { ok: false, error: shutdownDeadlineError() };
+      }
+      const results = await settled;
       const failed = results.find((result) => !result.ok);
       return failed !== undefined && !failed.ok
         ? failed
         : { ok: true, value: results.flatMap((result) => result.ok ? [result.value] : []) };
     },
   };
+}
+
+async function waitForPolicyResolution(
+  policy: ProcessRuntimeDependencies["policy"],
+  escalationId: Parameters<ProcessRuntimeDependencies["policy"]["getEscalation"]>[0],
+  deadline: number,
+): Promise<"allow" | "deny"> {
+  while (Date.now() < deadline) {
+    const current = await policy.getEscalation(escalationId);
+    if (current.ok && current.value.state === "resolved") return current.value.resolution ?? "deny";
+    if (!current.ok && current.error.kind !== "not-found") return "deny";
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return "deny";
 }
 
 export const createProcessRuntime: CreateProcessRuntime = (options) => ({

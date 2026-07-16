@@ -27,6 +27,7 @@ These records capture the decisions agreed during the Omega.dev design interview
 | [0013](0013-daemon-restart-and-process-recovery.md) | Daemon restart and non-resumable tool processes | Accepted |
 | [0014](0014-minimal-initial-harness.md) | Minimal initial harness | Accepted |
 | [0015](0015-testing-and-ai-feedback-loop.md) | Testing and the AI feedback loop | Accepted |
+| [0016](0016-enforceable-process-sandbox-boundary.md) | Enforceable process sandbox boundary | Accepted |
 
 ## Known PRD conflicts
 
@@ -44,7 +45,7 @@ The following v0.2 PRD positions were superseded during the interview and should
 
 These implementation choices were not finalized and therefore do not have accepted ADRs:
 
-- Default sandbox technology and operating-system portability.
+- First concrete sandbox backend and operating-system portability beyond Docker/Podman.
 - Exact HTTP resource paths, SSE event envelope, and JSONL runner protocol schemas.
 - Initial Promotion Eval thresholds, replicate counts, budgets, and regression metrics.
 - Exact OmegaBench-10 fixtures, per-task run budgets, and replicate schedule.

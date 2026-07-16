@@ -1,0 +1,78 @@
+{
+  "root": ".",
+  "typecheck_cmd": "pnpm exec tsc -p tsconfig.contract.json",
+  "contract": [
+    "src/contracts/index.ts",
+    "src/config/defaults.ts",
+    "src/shared/core.ts"
+  ],
+  "modules": {
+    "persistence": [
+      "src/persistence/object-store.ts",
+      "src/persistence/project-repository.ts",
+      "src/persistence/session-repository.ts",
+      "src/persistence/artifact-store.ts",
+      "src/persistence/persistence.test.ts"
+    ],
+    "process-runtime": [
+      "src/process/sandbox-backend.ts",
+      "src/process/process-supervisor.ts",
+      "src/process/file-service.ts",
+      "src/process/process-runtime.test.ts"
+    ],
+    "model-routing": [
+      "src/models/provider-registry.ts",
+      "src/models/openrouter-adapter.ts",
+      "src/models/model-router.ts",
+      "src/models/model-routing.test.ts"
+    ],
+    "execution-policy": [
+      "src/policy/action-facts.ts",
+      "src/policy/policy-engine.ts",
+      "src/policy/escalation-store.ts",
+      "src/policy/execution-policy.test.ts"
+    ],
+    "sessions": [
+      "src/sessions/session-service.ts",
+      "src/sessions/child-sessions.ts",
+      "src/sessions/handoffs.ts",
+      "src/sessions/recovery.ts",
+      "src/sessions/sessions.test.ts"
+    ],
+    "harness-runtime": [
+      "src/harness/harness-repository.ts",
+      "src/harness/runner-host.ts",
+      "src/harness/activation-service.ts",
+      "src/harness/initial-harness.ts",
+      "src/harness/harness-runtime.test.ts"
+    ],
+    "knowledge-marketplace": [
+      "src/knowledge/knowledge-service.ts",
+      "src/knowledge/marketplace-service.ts",
+      "src/knowledge/artifact-state.ts",
+      "src/knowledge/knowledge-marketplace.test.ts"
+    ],
+    "evolution-benchmarks": [
+      "src/evolution/evolution-service.ts",
+      "src/evolution/benchmark-service.ts",
+      "src/evolution/promotion-evaluator.ts",
+      "src/evolution/canary-monitor.ts",
+      "src/evolution/omega-bench-manifest.ts",
+      "src/evolution/evolution-benchmarks.test.ts"
+    ],
+    "clients": [
+      "src/clients/local-client.ts",
+      "src/clients/cli.ts",
+      "src/clients/html-app.ts",
+      "src/clients/clients.test.ts"
+    ],
+    "daemon-integrator": [
+      "src/app/omega-app.ts",
+      "src/app/http-server.ts",
+      "src/app/sse-broker.ts",
+      "src/app/daemon-integrator.test.ts",
+      "src/main.ts"
+    ]
+  },
+  "integrator": "daemon-integrator"
+}

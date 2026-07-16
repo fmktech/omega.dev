@@ -7,6 +7,7 @@ import type {
   ArtifactRecord,
   ByteCount,
   CapabilityEnvelope,
+  CredentialEnvName,
   DurationMs,
   EventId,
   ExecutionPolicy,
@@ -57,6 +58,7 @@ const NOW = "2026-07-16T12:00:00.000Z" as Timestamp;
 const PROJECT_ID = "project-test" as ProjectId;
 const WORKSPACE_ID = "workspace-test" as WorkspaceId;
 const HARNESS_ID = "harness-test" as HarnessId;
+const CANDIDATE_HARNESS_ID = "harness-candidate" as HarnessId;
 
 class MemoryObjects implements ObjectStore {
   readonly values = new Map<ObjectHash, Uint8Array>();
@@ -228,18 +230,25 @@ function fixture() {
     sourceArtifacts: [],
     createdAt: NOW,
   };
+  const candidate: HarnessManifest = {
+    ...harness,
+    id: CANDIDATE_HARNESS_ID,
+    alias: "candidate",
+    parents: [HARNESS_ID],
+  };
+  const pointerWrites = { count: 0 };
   const service = createSessionService({
     config: DEFAULT_CONFIG.sessions,
     repository,
-    projects: projectRepository(project, workspace),
-    harnesses: harnessRepository(harness),
+    projects: projectRepository(project, workspace, pointerWrites),
+    harnesses: harnessRepository([harness, candidate], HARNESS_ID),
     runners,
     processes,
     models: modelRouter(),
     policy: allowPolicy(),
     objects,
   });
-  return { service, repository, objects, processes, runners };
+  return { service, repository, objects, processes, runners, project, candidate, pointerWrites };
 }
 
 describe("session service", () => {
@@ -254,6 +263,44 @@ describe("session service", () => {
     expect((f.repository.events.get(result.value.header.id) ?? []).map((event) => event.payload.kind)).toEqual([
       "session.started", "runner.started",
     ]);
+  });
+
+  it("starts an inactive pinned candidate for benchmarking without touching the active harness pointer", async () => {
+    const f = fixture();
+    const suppliedRoute = route("main-coder");
+    const suppliedCapabilities = envelope({
+      grants: [{ kind: "read-files", pathPrefixes: ["fixtures" as RelativePath] }],
+      modelRoles: ["main-coder"],
+      maxModelCalls: 2,
+      maxProcessStarts: 1,
+    });
+    const credentialEnvNames = ["BENCHMARK_TOKEN" as CredentialEnvName];
+
+    const result = await f.service.startBenchmarkTask({
+      projectId: PROJECT_ID,
+      workspaceId: WORKSPACE_ID,
+      objective: " evaluate inactive candidate ",
+      harnessId: f.candidate.id,
+      route: suppliedRoute,
+      policyProfile: "autonomous",
+      capabilityEnvelope: suppliedCapabilities,
+      credentialEnvNames,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.header).toMatchObject({
+      role: "promotion-eval",
+      objective: "evaluate inactive candidate",
+      initialHarnessId: CANDIDATE_HARNESS_ID,
+      initialModelRoutes: [suppliedRoute],
+      policyProfile: "autonomous",
+      capabilityEnvelope: suppliedCapabilities,
+      credentialEnvNames,
+    });
+    expect(f.project.activeHarnessId).toBe(HARNESS_ID);
+    expect(f.pointerWrites.count).toBe(0);
+    expect(f.runners.starts.at(-1)?.initialHarnessId).toBe(CANDIDATE_HARNESS_ID);
   });
 
   it("resumes into a fresh linked session with exact handoff and context evidence", async () => {
@@ -407,23 +454,39 @@ function route(role: ModelRole): ModelRouteSignature {
   };
 }
 
-function projectRepository(project: ProjectRecord, workspace: WorkspaceRecord): ProjectRepository {
+function projectRepository(
+  project: ProjectRecord,
+  workspace: WorkspaceRecord,
+  pointerWrites: { count: number },
+): ProjectRepository {
   return {
     async registerWorkspace() { return { ok: true, value: { project, workspace } }; },
+    async registerBenchmarkWorkspace(projectId) {
+      return projectId === project.id ? { ok: true, value: workspace } : notFound("project", projectId);
+    },
     async getProject(id) { return id === project.id ? { ok: true, value: project } : notFound("project", id); },
     async getWorkspace(id) { return id === workspace.id ? { ok: true, value: workspace } : notFound("workspace", id); },
     async listProjects() { return { ok: true, value: { items: [project], nextCursor: null } }; },
-    async compareAndSetActiveHarness() { return { ok: true, value: project }; },
+    async compareAndSetActiveHarness() {
+      pointerWrites.count += 1;
+      return { ok: true, value: project };
+    },
   };
 }
 
-function harnessRepository(harness: HarnessManifest): HarnessRepository {
+function harnessRepository(harnesses: readonly HarnessManifest[], activeHarnessId: HarnessId): HarnessRepository {
   return {
     async putComponent() { return { ok: false, error: validationError("unused") }; },
-    async putHarness() { return { ok: true, value: harness }; },
-    async getHarness(id) { return id === harness.id ? { ok: true, value: harness } : notFound("harness", id); },
-    async getActiveHarness() { return { ok: true, value: harness }; },
-    async listProjectHarnesses() { return { ok: true, value: { items: [harness], nextCursor: null } }; },
+    async putHarness(manifest) { return { ok: true, value: manifest }; },
+    async getHarness(id) {
+      const harness = harnesses.find((candidate) => candidate.id === id);
+      return harness === undefined ? notFound("harness", id) : { ok: true, value: harness };
+    },
+    async getActiveHarness() {
+      const harness = harnesses.find((candidate) => candidate.id === activeHarnessId);
+      return harness === undefined ? notFound("harness", activeHarnessId) : { ok: true, value: harness };
+    },
+    async listProjectHarnesses() { return { ok: true, value: { items: harnesses, nextCursor: null } }; },
   };
 }
 

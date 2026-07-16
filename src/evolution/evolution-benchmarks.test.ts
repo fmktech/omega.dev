@@ -210,6 +210,7 @@ function fakeSessionService(
 ): SessionService {
   return {
     startTask: () => rejectUnexpected(),
+    startBenchmarkTask: () => rejectUnexpected(),
     resumeThread: () => rejectUnexpected(),
     spawnChild: overrides.spawnChild ?? (() => rejectUnexpected()),
     complete: overrides.complete ?? (() => rejectUnexpected()),

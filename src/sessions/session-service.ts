@@ -252,6 +252,41 @@ export const createSessionService: CreateSessionService = (options) => {
       return launch(header, harness.value, workspace.value, null);
     },
 
+    async startBenchmarkTask(request) {
+      if (request.objective.trim().length === 0) return validation("Benchmark objective must not be empty", "objective");
+      const project = await options.projects.getProject(request.projectId);
+      if (!project.ok) return project;
+      const workspace = await options.projects.getWorkspace(request.workspaceId);
+      if (!workspace.ok) return workspace;
+      if (workspace.value.projectId !== project.value.id) {
+        return validation("Workspace does not belong to the benchmark project", "workspaceId");
+      }
+      const harness = await options.harnesses.getHarness(request.harnessId);
+      if (!harness.ok) return harness;
+      if (harness.value.projectId !== project.value.id) {
+        return validation("Pinned benchmark harness does not belong to the requested project", "harnessId");
+      }
+      const createdAt = now();
+      const header: SessionHeader = {
+        id: `session_${randomUUID()}` as SessionId,
+        threadId: `thread_${randomUUID()}` as ThreadId,
+        parentSessionId: null,
+        continuation: null,
+        projectId: project.value.id,
+        workspaceId: workspace.value.id,
+        role: "promotion-eval",
+        objective: request.objective.trim(),
+        initialHarnessId: harness.value.id,
+        initialModelRoutes: [request.route],
+        policyProfile: request.policyProfile,
+        capabilityEnvelope: request.capabilityEnvelope,
+        credentialEnvNames: [...request.credentialEnvNames],
+        eventSchemaVersion: 1,
+        createdAt,
+      };
+      return launch(header, harness.value, workspace.value, null);
+    },
+
     async resumeThread(request) {
       const source = await options.repository.get(request.sourceSessionId);
       if (!source.ok) return source;

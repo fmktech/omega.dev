@@ -344,6 +344,21 @@ function projectRepository(initial: ProjectRecord, forceCasConflict: boolean) {
   const records = new Map<ProjectId, ProjectRecord>([[initial.id, initial]]);
   const repository: ProjectRepository = {
     async registerWorkspace() { return { ok: false, error: validationStore("unused") }; },
+    async registerBenchmarkWorkspace(id, path, fixtureHash) {
+      if (!records.has(id)) {
+        return notFoundProject(id);
+      }
+      return {
+        ok: true,
+        value: {
+          id: `benchmark-workspace-${fixtureHash}` as WorkspaceId,
+          projectId: id,
+          path,
+          registeredAt: NOW,
+          lastSeenAt: NOW,
+        },
+      };
+    },
     async getProject(id) { return records.has(id) ? { ok: true, value: records.get(id)! } : notFoundProject(id); },
     async getWorkspace(id) { return { ok: false, error: { kind: "not-found", resource: "workspace", id, recoverable: false, callerAction: "propagate" } }; },
     async listProjects() { return { ok: true, value: { items: [...records.values()], nextCursor: null } }; },

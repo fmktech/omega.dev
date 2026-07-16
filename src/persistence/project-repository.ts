@@ -112,6 +112,81 @@ export const createFileProjectRepository: CreateFileProjectRepository = (root, o
     }
   },
 
+  async registerBenchmarkWorkspace(projectId, path, fixtureHash) {
+    if (!isAbsolute(path)) {
+      return { ok: false, error: validationError("Benchmark workspace path must be absolute", "path") };
+    }
+    if (!/^[a-f0-9]{64}$/u.test(fixtureHash)) {
+      return { ok: false, error: validationError("Fixture hash must be lowercase SHA-256 hexadecimal", "fixtureHash") };
+    }
+    let canonicalPath: string;
+    try {
+      canonicalPath = await realpath(path);
+    } catch (error) {
+      return { ok: false, error: ioError("resolve-benchmark-workspace", error) };
+    }
+    const workspaceId = `workspace_benchmark_${hashText(`${projectId}:${canonicalPath}:${fixtureHash}`).slice(0, 32)}` as WorkspaceId;
+    const projectPath = projectRecordPath(root, projectId);
+    const workspacePath = workspaceRecordPath(root, projectId, workspaceId);
+    const workspaceIndexPath = globalWorkspacePath(root, workspaceId);
+    const benchmarkIdentityPath = join(
+      root,
+      "projects",
+      safeStorageKey(projectId),
+      "benchmark-workspaces",
+      `${safeStorageKey(workspaceId)}.json`,
+    );
+    try {
+      return await withFileLock(projectPath, async () => {
+        const project = await loadOptionalProject(projectPath);
+        if (!project.ok) {
+          return project;
+        }
+        if (project.value === null) {
+          return { ok: false, error: notFound("project", projectId) };
+        }
+        const existing = await loadOptionalWorkspace(workspaceIndexPath);
+        if (!existing.ok) {
+          return existing;
+        }
+        const now = timestampNow();
+        if (existing.value !== null
+          && (existing.value.projectId !== projectId || existing.value.path !== canonicalPath)) {
+          return {
+            ok: false,
+            error: {
+              kind: "conflict",
+              resource: "benchmark-workspace-identity",
+              expected: `${projectId}:${canonicalPath}`,
+              actual: `${existing.value.projectId}:${existing.value.path}`,
+              recoverable: true,
+              callerAction: "refresh-version-and-retry",
+            },
+          };
+        }
+        const workspace: WorkspaceRecord = existing.value === null
+          ? {
+              id: workspaceId,
+              projectId,
+              path: canonicalPath as AbsolutePath,
+              registeredAt: now,
+              lastSeenAt: now,
+            }
+          : { ...existing.value, lastSeenAt: now };
+        const stored = await persistSnapshot(objects, workspace);
+        if (!stored.ok) {
+          return stored;
+        }
+        await atomicWriteFile(workspacePath, `${JSON.stringify(workspace)}\n`);
+        await atomicWriteFile(workspaceIndexPath, `${JSON.stringify(workspace)}\n`);
+        await atomicWriteFile(benchmarkIdentityPath, `${JSON.stringify({ workspaceId, fixtureHash })}\n`);
+        return { ok: true, value: workspace };
+      });
+    } catch (error) {
+      return { ok: false, error: ioError("register-benchmark-workspace", error) };
+    }
+  },
+
   async getProject(id) {
     const path = projectRecordPath(root, id);
     try {

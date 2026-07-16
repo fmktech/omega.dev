@@ -70,6 +70,9 @@ function repository(root: string): ProjectRepository {
   };
   return {
     async registerWorkspace() { return { ok: true, value: { project, workspace } }; },
+    async registerBenchmarkWorkspace(projectId, path, _fixtureHash) {
+      return { ok: true, value: { ...workspace, projectId, path } };
+    },
     async getProject() { return { ok: true, value: project }; },
     async getWorkspace() { return { ok: true, value: workspace }; },
     async listProjects() { return { ok: true, value: { items: [project], nextCursor: null } }; },

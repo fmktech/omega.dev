@@ -15,6 +15,7 @@ import type {
   DurationMs,
   EventId,
   HarnessId,
+  ObjectHash,
   ObjectStore,
   ProjectId,
   SessionHeader,
@@ -140,6 +141,76 @@ describe("filesystem persistence", () => {
       expect(secondary.value.project.id).toBe(primary.value.project.id);
       expect(secondary.value.workspace.id).not.toBe(primary.value.workspace.id);
       expect(primary.value.project.repository.canonicalRemote).toBe("github.com/fmktech/example");
+    }
+  });
+
+  it("attaches versioned benchmark workspaces without mutating project identity or harness pointer", async () => {
+    const root = await temporaryRoot();
+    const stateRoot = join(root, "state");
+    const repositoryPath = join(root, "repository");
+    const fixturePath = join(root, "fixture");
+    await mkdir(repositoryPath);
+    await mkdir(fixturePath);
+    const objects = createFileObjectStore(stateRoot as AbsolutePath);
+    const projects = createFileProjectRepository(stateRoot as AbsolutePath, objects);
+    const registered = await projects.registerWorkspace(repositoryPath as AbsolutePath);
+    expect(registered.ok).toBe(true);
+    if (!registered.ok) {
+      return;
+    }
+    const activeHarnessId = "harness_active" as HarnessId;
+    const activated = await projects.compareAndSetActiveHarness(registered.value.project.id, null, activeHarnessId);
+    expect(activated.ok).toBe(true);
+    if (!activated.ok) {
+      return;
+    }
+    const projectBefore = await projects.getProject(registered.value.project.id);
+    const fixtureV1 = "1".repeat(64) as ObjectHash;
+    const fixtureV2 = "2".repeat(64) as ObjectHash;
+    const first = await projects.registerBenchmarkWorkspace(
+      registered.value.project.id,
+      fixturePath as AbsolutePath,
+      fixtureV1,
+    );
+    const reused = await projects.registerBenchmarkWorkspace(
+      registered.value.project.id,
+      fixturePath as AbsolutePath,
+      fixtureV1,
+    );
+    const rematerialized = await projects.registerBenchmarkWorkspace(
+      registered.value.project.id,
+      fixturePath as AbsolutePath,
+      fixtureV2,
+    );
+    const projectAfter = await projects.getProject(registered.value.project.id);
+
+    expect(first.ok && reused.ok && rematerialized.ok).toBe(true);
+    if (first.ok && reused.ok && rematerialized.ok) {
+      expect(first.value.projectId).toBe(registered.value.project.id);
+      expect(reused.value.id).toBe(first.value.id);
+      expect(rematerialized.value.id).not.toBe(first.value.id);
+    }
+    expect(projectAfter).toEqual(projectBefore);
+    if (projectAfter.ok) {
+      expect(projectAfter.value.activeHarnessId).toBe(activeHarnessId);
+      expect(projectAfter.value.repository).toEqual(activated.value.repository);
+    }
+  });
+
+  it("rejects benchmark workspace attachment for a missing project", async () => {
+    const root = await temporaryRoot();
+    const fixturePath = join(root, "fixture");
+    await mkdir(fixturePath);
+    const objects = createFileObjectStore(root as AbsolutePath);
+    const projects = createFileProjectRepository(root as AbsolutePath, objects);
+    const result = await projects.registerBenchmarkWorkspace(
+      "project_missing" as ProjectId,
+      fixturePath as AbsolutePath,
+      "3".repeat(64) as ObjectHash,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("not-found");
     }
   });
 

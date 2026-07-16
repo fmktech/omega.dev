@@ -734,6 +734,7 @@ export interface ModelStream {
 // -----------------------------------------------------------------------------
 
 export type CapabilityKind =
+  | "model-call"
   | "read-files"
   | "write-files"
   | "start-process"

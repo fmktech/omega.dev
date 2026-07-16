@@ -15,7 +15,7 @@ Omega runs as a persistent local daemon that owns the canonical API and runtime 
 - The daemon binds only to loopback in v0.
 - Request/response operations use a local HTTP API.
 - Live updates use Server-Sent Events unless a later protocol requirement proves SSE insufficient.
-- A generated local bearer token authenticates clients.
+- A bearer token loaded by the daemon and CLI from the `OMEGA_API_TOKEN` process environment authenticates clients. The HTML client's unlock form accepts that same token into page memory only; refresh locks the page. Omega does not generate, persist, or expose the token.
 - Neither client contains a separate agent runtime or privileged implementation path.
 
 ## Consequences
@@ -23,6 +23,7 @@ Omega runs as a persistent local daemon that owns the canonical API and runtime 
 - CLI and HTML behavior cannot drift behind separate backends.
 - Background work continues when a client disconnects.
 - API contracts become an early implementation dependency.
+- Operators own token generation, inject it into the daemon and CLI process environments, and enter it manually into the HTML unlock form; Omega never writes the token to disk or browser storage.
 - Remote access, multi-user authorization, and hosted control planes are outside v0.
 
 ## Alternatives considered
@@ -30,4 +31,3 @@ Omega runs as a persistent local daemon that owns the canonical API and runtime 
 - **CLI as the runtime:** rejected because HTML and reconnecting clients would need a second control path.
 - **HTML as primary with CLI wrappers:** rejected because the terminal is a first-class product surface.
 - **Vercel-hosted runtime:** rejected because local autonomous operation is a requirement.
-

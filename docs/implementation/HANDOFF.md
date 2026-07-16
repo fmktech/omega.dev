@@ -9,6 +9,7 @@ Do not edit these files during fan-out:
 - `src/contracts/index.ts`
 - `src/config/defaults.ts`
 - `src/shared/core.ts`
+- `docs/implementation/runtime-contract.md`
 
 If a signature is wrong or missing, stop and report the gap to the orchestrator. The orchestrator alone may amend and re-freeze the contract, then rebroadcast the change.
 
@@ -24,6 +25,7 @@ If a signature is wrong or missing, stop and report the gap to the orchestrator.
 8. Tests assert observable behavior and use real owned collaborators or in-memory fakes; mock only external boundaries.
 9. Do not add dependencies, change compiler settings, or amend defaults without orchestrator approval.
 10. Finish with no TODOs, skipped tests, placeholder branches, `any`, or untyped wire data.
+11. Export the exact named factories and implement the HTTP/SSE/JSONL rules in `runtime-contract.md`.
 
 ## Build order
 
@@ -32,8 +34,8 @@ All nine leaf modules can start independently. `daemon-integrator` reads only th
 ## Contract and decision context
 
 - Contract seam inventory: `docs/implementation/contract-seams.md`
+- Runtime construction and transport: `docs/implementation/runtime-contract.md`
 - Architectural decisions: `docs/adrs/README.md`
 - Testing/evaluation loop: `docs/adrs/0015-testing-and-ai-feedback-loop.md`
 - Sandbox enforcement: `docs/adrs/0016-enforceable-process-sandbox-boundary.md`
 - Module specs: `docs/implementation/modules/`
-

@@ -4,12 +4,16 @@
  */
 
 import type {
+  AbsolutePath,
   BenchmarkSuiteId,
+  BenchmarkTaskId,
   ByteCount,
   CredentialEnvName,
   DurationMs,
   OmegaConfig,
+  RelativePath,
   TokenCount,
+  UsdMicros,
 } from "../contracts/index.js";
 
 export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
@@ -22,6 +26,11 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
     host: "127.0.0.1",
     port: 7337,
     bearerTokenEnvName: "OMEGA_API_TOKEN" as CredentialEnvName,
+    requestPath: "/api/v1/requests",
+    sessionEventsPathTemplate: "/api/v1/sessions/:sessionId/events",
+    healthPath: "/healthz",
+    authScheme: "bearer",
+    protocolVersion: 1,
   },
   storage: {
     fsyncEvents: true,
@@ -34,6 +43,36 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
     gracefulShutdownMs: 5_000 as DurationMs,
     orphanPolicy: "verify-and-terminate",
     sandboxBackend: "auto",
+    defaultImage: "omega-runner:local",
+    defaultContainerUser: "1000:1000",
+    workspaceMountPath: "/workspace" as AbsolutePath,
+  },
+  sessions: {
+    defaultPolicyProfile: "guarded",
+    mainCapabilities: {
+      grants: [
+        { kind: "read-files", pathPrefixes: ["." as RelativePath] },
+        { kind: "write-files", pathPrefixes: ["." as RelativePath] },
+        { kind: "start-process", executableNames: [] },
+        { kind: "process-input" },
+        { kind: "spawn-child" },
+        { kind: "write-knowledge" },
+        { kind: "install-marketplace" },
+        { kind: "publish-marketplace" },
+        { kind: "manage-marketplace" },
+        { kind: "create-harness-candidate" },
+        { kind: "run-promotion-eval" },
+        { kind: "activate-harness" },
+      ],
+      modelRoles: ["main-coder", "diagnostician", "harness-mutator", "promotion-evaluator", "crystallizer"],
+      maxCostUsdMicros: 0 as UsdMicros,
+      maxModelCalls: 128,
+      maxProcessStarts: 64,
+      maxInputTokens: 1_000_000 as TokenCount,
+      maxOutputTokens: 256_000 as TokenCount,
+      wallTimeMs: 3_600_000 as DurationMs,
+    },
+    credentialEnvNames: [],
   },
   models: {
     providers: [
@@ -171,10 +210,34 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
     profile: "guarded",
     uncertainty: "deny",
     policyRole: "fast-policy",
+    hardRules: [
+      {
+        id: "process-timeout-ceiling",
+        kind: "maximum-process-timeout",
+        maximum: 1_800_000 as DurationMs,
+      },
+    ],
   },
   benchmarks: {
     developmentSuiteId: "omegabench-10@1" as BenchmarkSuiteId,
     maxConcurrentRuns: 1,
+    developmentPromotionPolicy: {
+      id: "omega-promotion-eval@1",
+      version: "1",
+      replicatesPerHarness: 1,
+      thresholds: {
+        minimumComparablePairs: 8,
+        minimumSuccessRateDelta: 0.1,
+        maximumProtectedRegressions: 0,
+        confidenceLevel: 0.8,
+      },
+      protectedTaskIds: [
+        "offline-dependency@1" as BenchmarkTaskId,
+        "misleading-instructions@1" as BenchmarkTaskId,
+      ],
+      workspaceBaseline: "fixture-object-hash",
+      comparisonOrder: ["invariants", "capability", "cost", "latency"],
+    },
     fallbackBudget: null,
   },
 };

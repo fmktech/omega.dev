@@ -45,9 +45,6 @@ The following v0.2 PRD positions were superseded during the interview and should
 
 These implementation choices were not finalized and therefore do not have accepted ADRs:
 
-- First concrete sandbox backend and operating-system portability beyond Docker/Podman.
-- Exact HTTP resource paths, SSE event envelope, and JSONL runner protocol schemas.
-- Initial Promotion Eval thresholds, replicate counts, budgets, and regression metrics.
-- Exact OmegaBench-10 fixtures, per-task run budgets, and replicate schedule.
-- Workspace baseline capture mechanism for reproducible paired evaluation.
+- Operating-system portability beyond the Docker/Podman OCI boundary.
+- Exact OmegaBench-10 fixture contents and per-task budgets; route, policy, replicate, and baseline semantics are frozen in the runtime contract and defaults.
 - Retention, encryption-at-rest, backup, and garbage-collection policies.

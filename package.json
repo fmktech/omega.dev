@@ -15,7 +15,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test:conformance": "vitest run src/process/process-runtime.test.ts src/harness/harness-runtime.test.ts src/clients/clients.test.ts",
+    "test:e2e": "vitest run src/app/daemon-integrator.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "presubmit": "pnpm typecheck && pnpm build && pnpm test && pnpm test:conformance && pnpm test:e2e"
   },
   "dependencies": {
     "@openrouter/ai-sdk-provider": "3.0.0",

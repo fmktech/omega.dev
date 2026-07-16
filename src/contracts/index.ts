@@ -274,6 +274,7 @@ export type ProcessError =
   | ProcessNotRunningError
   | ProcessInterruptedError
   | BudgetExceededError
+  | UnsupportedError
   | IoError;
 export type ModelError =
   | ValidationError
@@ -375,6 +376,13 @@ export type BenchmarkBudget = {
   readonly maxProcessStarts: number;
 };
 
+export type PolicyHardRule =
+  | { readonly id: string; readonly kind: "deny-capabilities"; readonly capabilities: readonly CapabilityKind[] }
+  | { readonly id: string; readonly kind: "escalate-capabilities"; readonly capabilities: readonly CapabilityKind[] }
+  | { readonly id: string; readonly kind: "deny-path-prefixes"; readonly pathPrefixes: readonly RelativePath[] }
+  | { readonly id: string; readonly kind: "deny-network-hosts"; readonly hosts: readonly string[] }
+  | { readonly id: string; readonly kind: "maximum-process-timeout"; readonly maximum: DurationMs };
+
 export type OmegaConfig = {
   readonly schemaVersion: 1;
   readonly homeDirectory: {
@@ -385,6 +393,11 @@ export type OmegaConfig = {
     readonly host: "127.0.0.1" | "::1";
     readonly port: number;
     readonly bearerTokenEnvName: CredentialEnvName;
+    readonly requestPath: "/api/v1/requests";
+    readonly sessionEventsPathTemplate: "/api/v1/sessions/:sessionId/events";
+    readonly healthPath: "/healthz";
+    readonly authScheme: "bearer";
+    readonly protocolVersion: 1;
   };
   readonly storage: {
     readonly fsyncEvents: boolean;
@@ -399,6 +412,14 @@ export type OmegaConfig = {
     readonly orphanPolicy: "verify-and-terminate";
     /** `auto` selects an installed backend that can enforce the requested SandboxSpec. */
     readonly sandboxBackend: "auto" | "docker" | "podman";
+    readonly defaultImage: string;
+    readonly defaultContainerUser: string;
+    readonly workspaceMountPath: AbsolutePath;
+  };
+  readonly sessions: {
+    readonly defaultPolicyProfile: AutonomyProfile;
+    readonly mainCapabilities: CapabilityTemplate;
+    readonly credentialEnvNames: readonly CredentialEnvName[];
   };
   readonly models: {
     readonly providers: readonly ProviderConfig[];
@@ -408,10 +429,13 @@ export type OmegaConfig = {
     readonly profile: AutonomyProfile;
     readonly uncertainty: "deny" | "escalate";
     readonly policyRole: "fast-policy";
+    /** Evaluated in order before model classification; first matching deny/escalate wins. */
+    readonly hardRules: readonly PolicyHardRule[];
   };
   readonly benchmarks: {
     readonly developmentSuiteId: BenchmarkSuiteId;
     readonly maxConcurrentRuns: number;
+    readonly developmentPromotionPolicy: PromotionEvalPolicy;
     /** Null means every benchmark manifest must declare its own budget. */
     readonly fallbackBudget: BenchmarkBudget | null;
   };
@@ -431,7 +455,8 @@ export type ProjectRecord = {
   readonly id: ProjectId;
   readonly displayName: string;
   readonly repository: RepositoryIdentity;
-  readonly activeHarnessId: HarnessId;
+  /** Null only during atomic first-project bootstrap; tasks cannot start until initialized. */
+  readonly activeHarnessId: HarnessId | null;
   readonly createdAt: Timestamp;
   readonly updatedAt: Timestamp;
 };
@@ -493,6 +518,22 @@ export type SandboxSpec = {
   readonly allowedHosts: readonly string[];
   readonly memoryLimitBytes: ByteCount;
   readonly cpuTimeLimitMs: DurationMs;
+  readonly runtime: {
+    readonly kind: "oci";
+    readonly image: string;
+    /** Null allows a local image name; the backend must still record the resolved digest. */
+    readonly expectedImageDigest: Sha256 | null;
+    readonly containerUser: string;
+    readonly workspaceMountPath: AbsolutePath;
+  };
+};
+
+export type SandboxRuntimeIdentity = {
+  readonly backend: "docker" | "podman";
+  readonly backendVersion: string;
+  readonly image: string;
+  readonly imageDigest: Sha256;
+  readonly containerUser: string;
 };
 
 export type ProcessSpec = {
@@ -513,6 +554,7 @@ export type ProcessHandle = {
   readonly id: ProcessId;
   readonly state: "starting" | "running";
   readonly harnessId: HarnessId;
+  readonly sandbox: SandboxRuntimeIdentity;
   readonly startedAt: Timestamp;
 };
 
@@ -570,13 +612,14 @@ export type FileReadResult = {
 export type FileWriteRequest = {
   readonly workspaceId: WorkspaceId;
   readonly path: RelativePath;
-  readonly expectedSha: Sha256;
+  /** Null means create only if the path does not exist. */
+  readonly expectedSha: Sha256 | null;
   readonly content: string;
 };
 
 export type FileWriteResult = {
   readonly path: RelativePath;
-  readonly previousSha: Sha256;
+  readonly previousSha: Sha256 | null;
   readonly sha: Sha256;
   readonly size: ByteCount;
 };
@@ -690,14 +733,16 @@ export type CapabilityKind =
   | "spawn-child"
   | "write-knowledge"
   | "install-marketplace"
+  | "publish-marketplace"
+  | "manage-marketplace"
   | "create-harness-candidate"
   | "run-promotion-eval"
   | "activate-harness";
 
 export type CapabilityGrant =
   | { readonly kind: "read-files" | "write-files"; readonly pathPrefixes: readonly RelativePath[] }
-  | { readonly kind: "start-process"; readonly executableNames: readonly string[] }
-  | { readonly kind: "process-input" | "spawn-child" | "write-knowledge" | "install-marketplace" | "create-harness-candidate" | "run-promotion-eval" | "activate-harness" }
+  | { readonly kind: "start-process"; /** Empty permits any executable present inside the enforced sandbox. */ readonly executableNames: readonly string[] }
+  | { readonly kind: "process-input" | "spawn-child" | "write-knowledge" | "install-marketplace" | "publish-marketplace" | "manage-marketplace" | "create-harness-candidate" | "run-promotion-eval" | "activate-harness" }
   | { readonly kind: "network-egress"; readonly allowedHosts: readonly string[] }
   | { readonly kind: "inject-credential"; readonly credentialEnvNames: readonly CredentialEnvName[] };
 
@@ -713,11 +758,20 @@ export type CapabilityEnvelope = {
   readonly createdAt: Timestamp;
 };
 
+export type CapabilityTemplate = Omit<CapabilityEnvelope, "createdAt">;
+
 export type ActionFacts =
   | { readonly kind: "process"; readonly executable: string; readonly args: readonly string[]; readonly cwd: AbsolutePath; readonly credentialEnvNames: readonly CredentialEnvName[]; readonly sandbox: SandboxSpec }
-  | { readonly kind: "file-write"; readonly workspaceId: WorkspaceId; readonly path: RelativePath; readonly expectedSha: Sha256 }
-  | { readonly kind: "process-input"; readonly processId: ProcessId; readonly byteCount: ByteCount }
+  | { readonly kind: "file-write"; readonly workspaceId: WorkspaceId; readonly path: RelativePath; readonly expectedSha: Sha256 | null }
+  | { readonly kind: "process-input"; readonly processId: ProcessId; readonly input: ProcessInput }
+  | { readonly kind: "child-spawn"; readonly parentSessionId: SessionId; readonly requestedGrants: readonly CapabilityGrant[] }
+  | { readonly kind: "knowledge-write"; readonly projectId: ProjectId; readonly documentId: KnowledgeDocumentId; readonly expectedSha: Sha256 | null }
   | { readonly kind: "marketplace-install"; readonly artifactId: MarketplaceArtifactId; readonly state: MarketplaceState }
+  | { readonly kind: "marketplace-publish"; readonly artifactId: MarketplaceArtifactId; readonly sourceProjectId: ProjectId }
+  | { readonly kind: "marketplace-transition"; readonly artifactId: MarketplaceArtifactId; readonly from: MarketplaceState; readonly to: MarketplaceState }
+  | { readonly kind: "marketplace-activate"; readonly artifactId: MarketplaceArtifactId; readonly projectId: ProjectId; readonly candidateHarnessId: HarnessId; readonly canaryOutcome: "healthy" }
+  | { readonly kind: "harness-candidate"; readonly projectId: ProjectId; readonly componentKinds: readonly ComponentKind[] }
+  | { readonly kind: "promotion-eval"; readonly projectId: ProjectId; readonly suiteId: BenchmarkSuiteId; readonly incumbentId: HarnessId; readonly candidateId: HarnessId }
   | { readonly kind: "harness-activation"; readonly projectId: ProjectId; readonly incumbentId: HarnessId; readonly candidateId: HarnessId };
 
 export type PolicyDecision =
@@ -815,6 +869,7 @@ export type RunnerRequest =
   | { readonly kind: "session.complete"; readonly requestId: RequestId; readonly outcome: SessionOutcome };
 
 export type RunnerReply =
+  | { readonly kind: "request.rejected"; readonly requestId: RequestId; readonly error: HarnessVersionMismatchError }
   | { readonly kind: "model.started"; readonly requestId: RequestId; readonly result: Result<{ readonly streamId: ModelStreamId; readonly route: ModelRouteSignature }, ModelError> }
   | { readonly kind: "process.started"; readonly requestId: RequestId; readonly result: Result<ProcessHandle, ProcessError> }
   | { readonly kind: "process.observed"; readonly requestId: RequestId; readonly result: Result<ProcessObservation, ProcessError> }
@@ -855,6 +910,18 @@ export type KernelToRunnerMessage =
   | { readonly kind: "kernel.reply"; readonly reply: RunnerReply }
   | { readonly kind: "kernel.event"; readonly event: KernelToRunnerEvent };
 
+export type RunnerToKernelEnvelope = {
+  readonly protocol: "omega-runner-jsonl";
+  readonly version: 1;
+  readonly message: RunnerToKernelMessage;
+};
+
+export type KernelToRunnerEnvelope = {
+  readonly protocol: "omega-runner-jsonl";
+  readonly version: 1;
+  readonly message: KernelToRunnerMessage;
+};
+
 // -----------------------------------------------------------------------------
 // Sessions, child sessions, handoffs, and semantic events
 // -----------------------------------------------------------------------------
@@ -863,10 +930,17 @@ export type SessionState = "starting" | "running" | "waiting" | "completed" | "f
 export type SessionRole = "main" | "task" | "evolution" | "promotion-eval" | "diagnostician" | "crystallizer";
 export type SessionOutcome = "succeeded" | "failed" | "cancelled";
 
+export type SessionContinuation = {
+  readonly sourceSessionId: SessionId;
+  readonly handoffArtifactId: ArtifactId;
+  readonly contextArtifactIds: readonly ArtifactId[];
+};
+
 export type SessionHeader = {
   readonly id: SessionId;
   readonly threadId: ThreadId;
   readonly parentSessionId: SessionId | null;
+  readonly continuation: SessionContinuation | null;
   readonly projectId: ProjectId;
   readonly workspaceId: WorkspaceId;
   readonly role: SessionRole;
@@ -1004,6 +1078,13 @@ export type KnowledgeWriteRequest = {
 export type MarketplaceState = "experimental" | "proven" | "deprecated" | "quarantined";
 export type MarketplaceArtifactKind = "harness" | "tool" | "connector" | "skill" | "workflow" | "component-delta";
 
+export type MarketplaceCompatibility = {
+  readonly omegaSchemaVersions: readonly 1[];
+  readonly operatingSystems: readonly ("linux" | "darwin" | "windows")[];
+  readonly runtimes: readonly ComponentRuntime[];
+  readonly requiredExecutables: readonly string[];
+};
+
 export type MarketplaceArtifact = {
   readonly id: MarketplaceArtifactId;
   readonly kind: MarketplaceArtifactKind;
@@ -1016,7 +1097,15 @@ export type MarketplaceArtifact = {
   readonly sourceHarnessId: HarnessId;
   readonly scorecardIds: readonly ScorecardId[];
   readonly credentialEnvNames: readonly CredentialEnvName[];
+  readonly compatibility: MarketplaceCompatibility;
   readonly publishedAt: Timestamp;
+};
+
+export type MarketplaceTransitionRequest = {
+  readonly artifactId: MarketplaceArtifactId;
+  readonly expectedState: MarketplaceState;
+  readonly nextState: MarketplaceState;
+  readonly reason: string;
 };
 
 export type MarketplaceQuery = {
@@ -1026,11 +1115,31 @@ export type MarketplaceQuery = {
   readonly limit: number;
 };
 
+export type MarketplaceCanaryEvidence = {
+  readonly projectId: ProjectId;
+  readonly artifactId: MarketplaceArtifactId;
+  readonly candidateHarnessId: HarnessId;
+  /** Must name the same candidateHarnessId and a project-scoped source. */
+  readonly result: CanaryResult;
+};
+
 export type MarketplaceInstallation = {
   readonly artifactId: MarketplaceArtifactId;
   readonly projectId: ProjectId;
   readonly installedComponentIds: readonly ComponentId[];
+  readonly candidateHarnessId: HarnessId;
+  readonly compatibility: {
+    readonly compatible: true;
+    readonly omegaSchemaVersion: 1;
+    readonly operatingSystem: "linux" | "darwin" | "windows";
+    readonly availableRuntimes: readonly ComponentRuntime[];
+  };
+  readonly requiresCanary: boolean;
+  readonly activation: "installed-inactive" | "active";
+  /** Required before an experimental installation can become active. */
+  readonly canary: MarketplaceCanaryEvidence | null;
   readonly installedAt: Timestamp;
+  readonly activatedAt: Timestamp | null;
 };
 
 // -----------------------------------------------------------------------------
@@ -1053,12 +1162,24 @@ export type BenchmarkTaskPrivate = {
   readonly diagnosticTags: readonly string[];
 };
 
+export type PromotionEvalPolicy = {
+  readonly id: string;
+  readonly version: string;
+  readonly replicatesPerHarness: number;
+  readonly thresholds: PromotionThresholds;
+  readonly protectedTaskIds: readonly BenchmarkTaskId[];
+  readonly workspaceBaseline: "fixture-object-hash";
+  readonly comparisonOrder: readonly ["invariants", "capability", "cost", "latency"];
+};
+
 export type BenchmarkManifest = {
   readonly id: BenchmarkSuiteId;
   readonly name: string;
   readonly version: string;
   readonly tasks: readonly BenchmarkTaskPublic[];
   readonly privateTaskMetadataObjectHash: ObjectHash;
+  /** Authoritative paired-run schedule and thresholds for this manifest version. */
+  readonly promotionPolicy: PromotionEvalPolicy;
   readonly createdAt: Timestamp;
 };
 
@@ -1090,10 +1211,15 @@ export type BenchmarkRun = {
   readonly taskId: BenchmarkTaskId;
   readonly sessionId: SessionId;
   readonly harnessId: HarnessId;
+  readonly harnessComponentObjectHashes: readonly ObjectHash[];
   readonly executionPolicyComponentId: ComponentId;
   readonly route: ModelRouteSignature;
   readonly servingProviderGenerationId: string | null;
   readonly fixtureObjectHash: ObjectHash;
+  readonly environmentObjectHash: ObjectHash;
+  readonly effectiveBudget: BenchmarkBudget;
+  readonly benchmarkManifestVersion: string;
+  readonly promotionPolicyId: string;
   readonly outcome: BenchmarkOutcome;
   readonly failureCategory: string | null;
   readonly metrics: BenchmarkMetrics;
@@ -1103,13 +1229,60 @@ export type BenchmarkRun = {
   readonly completedAt: Timestamp;
 };
 
-export type PairedTaskResult = {
+export type BenchmarkExecutionRequest = {
+  readonly suiteId: BenchmarkSuiteId;
+  readonly manifestVersion: string;
+  readonly promotionPolicy: PromotionEvalPolicy;
+  readonly task: BenchmarkTaskPublic;
+  /** Supplied only to the trusted launcher/verifier boundary, never to the runner. */
+  readonly privateTask: BenchmarkTaskPrivate;
+  readonly harness: HarnessManifest;
+  readonly route: ModelRouteSignature;
+};
+
+export type BenchmarkExecutionEvidence = {
+  readonly sessionId: SessionId;
+  readonly executionPolicyComponentId: ComponentId;
+  /** Actual completed route, including serving provider and quantization. */
+  readonly route: ModelRouteSignature;
+  readonly servingProviderGenerationId: string | null;
+  readonly outcome: BenchmarkOutcome;
+  readonly failureCategory: string | null;
+  readonly metrics: BenchmarkMetrics;
+  readonly finalDiffArtifactId: ArtifactId;
+  readonly reportArtifactId: ArtifactId;
+  readonly startedAt: Timestamp;
+  readonly completedAt: Timestamp;
+};
+
+/** Trusted integrator seam that materializes isolated fixtures and runs hidden verifiers. */
+export interface BenchmarkRunLauncher {
+  execute(request: BenchmarkExecutionRequest): Promise<Result<BenchmarkExecutionEvidence, EvolutionError>>;
+}
+
+export type PairInvalidReason =
+  | "different-model"
+  | "different-reasoning"
+  | "different-serving-provider"
+  | "different-quantization"
+  | "different-budget"
+  | "different-fixture"
+  | "different-environment"
+  | "different-policy"
+  | "different-component-set"
+  | "unequal-replicates"
+  | "provider-metadata-missing";
+
+export type PairedTaskEvidence = {
   readonly taskId: BenchmarkTaskId;
   readonly incumbent: BenchmarkRun;
   readonly candidate: BenchmarkRun;
-  readonly comparable: boolean;
-  readonly invalidReason: string | null;
 };
+
+export type PairedTaskResult = PairedTaskEvidence & (
+  | { readonly comparable: true; readonly invalidReason: null }
+  | { readonly comparable: false; readonly invalidReason: PairInvalidReason }
+);
 
 export type PromotionDecision =
   | { readonly outcome: "promote"; readonly reason: string }
@@ -1130,6 +1303,7 @@ export type PromotionScorecard = {
   readonly incumbentHarnessId: HarnessId;
   readonly candidateHarnessId: HarnessId;
   readonly evaluatorHarnessId: HarnessId;
+  readonly promotionPolicyId: string;
   readonly pairedResults: readonly PairedTaskResult[];
   readonly thresholds: PromotionThresholds;
   readonly observedSuccessRateDelta: number;
@@ -1190,6 +1364,8 @@ export type StartTaskRequest = {
 export type ResumeThreadRequest = {
   readonly sourceSessionId: SessionId;
   readonly workspaceId: WorkspaceId;
+  readonly handoffArtifactId: ArtifactId;
+  readonly contextArtifactIds: readonly ArtifactId[];
 };
 
 export type ClientRequest =
@@ -1201,13 +1377,21 @@ export type ClientRequest =
   | { readonly kind: "session.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
   | { readonly kind: "artifact.read"; readonly requestId: RequestId; readonly artifactId: ArtifactId; readonly offset: ByteCount; readonly limit: ByteCount }
   | { readonly kind: "session.cancel"; readonly requestId: RequestId; readonly sessionId: SessionId; readonly reason: string }
+  | { readonly kind: "policy.list"; readonly requestId: RequestId; readonly sessionId: SessionId; readonly state: "pending" | "resolved"; readonly page: PageRequest }
   | { readonly kind: "policy.resolve"; readonly requestId: RequestId; readonly request: PolicyResolutionRequest }
   | { readonly kind: "evolution.start"; readonly requestId: RequestId; readonly request: EvolutionRequest }
   | { readonly kind: "evolution.get"; readonly requestId: RequestId; readonly jobId: EvolutionJobId }
+  | { readonly kind: "evolution.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
+  | { readonly kind: "evolution.cancel"; readonly requestId: RequestId; readonly jobId: EvolutionJobId; readonly reason: string }
   | { readonly kind: "benchmark.run-paired"; readonly requestId: RequestId; readonly suiteId: BenchmarkSuiteId; readonly incumbentId: HarnessId; readonly candidateId: HarnessId }
+  | { readonly kind: "scorecard.get"; readonly requestId: RequestId; readonly scorecardId: ScorecardId }
+  | { readonly kind: "scorecard.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
   | { readonly kind: "knowledge.catalog"; readonly requestId: RequestId; readonly query: KnowledgeQuery }
   | { readonly kind: "knowledge.read"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly documentId: KnowledgeDocumentId }
   | { readonly kind: "marketplace.search"; readonly requestId: RequestId; readonly query: MarketplaceQuery }
+  | { readonly kind: "marketplace.transition"; readonly requestId: RequestId; readonly request: MarketplaceTransitionRequest }
+  | { readonly kind: "harness.get"; readonly requestId: RequestId; readonly harnessId: HarnessId }
+  | { readonly kind: "harness.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
   | { readonly kind: "harness.rollback"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly targetHarnessId: HarnessId; readonly reason: string }
   | { readonly kind: "harness.pin"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly targetHarnessId: HarnessId; readonly reason: string };
 
@@ -1218,17 +1402,65 @@ export type ClientResponseValue =
   | { readonly kind: "sessions"; readonly page: Page<SessionRecord> }
   | { readonly kind: "artifact"; readonly slice: ArtifactSlice }
   | { readonly kind: "policy-escalation"; readonly escalation: PolicyEscalation }
+  | { readonly kind: "policy-escalations"; readonly page: Page<PolicyEscalation> }
   | { readonly kind: "evolution"; readonly job: EvolutionJob }
+  | { readonly kind: "evolutions"; readonly page: Page<EvolutionJob> }
   | { readonly kind: "scorecard"; readonly scorecard: PromotionScorecard }
+  | { readonly kind: "scorecards"; readonly page: Page<PromotionScorecard> }
   | { readonly kind: "knowledge-catalog"; readonly entries: readonly KnowledgeCatalogEntry[] }
   | { readonly kind: "knowledge-document"; readonly document: KnowledgeDocument }
   | { readonly kind: "marketplace-results"; readonly artifacts: readonly MarketplaceArtifact[] }
+  | { readonly kind: "marketplace-artifact"; readonly artifact: MarketplaceArtifact }
+  | { readonly kind: "harness"; readonly harness: HarnessManifest }
+  | { readonly kind: "harnesses"; readonly page: Page<HarnessManifest> }
   | { readonly kind: "harness-update"; readonly update: HarnessUpdate };
 
 export type ClientResponse = {
   readonly requestId: RequestId;
   readonly result: Result<ClientResponseValue, ApiError>;
 };
+
+export type SseFrame = {
+  /** Decimal SessionEvent sequence for persisted events; live deltas reuse the latest persisted sequence. */
+  readonly id: string;
+  readonly event: "omega.live";
+  readonly data: LiveEventEnvelope;
+};
+
+export type LocalHttpErrorResponse = {
+  readonly error: UnauthorizedError | ValidationError | ProtocolError | InternalError;
+};
+
+/** Complete loopback HTTP surface. Both clients and the daemon implement these literal routes. */
+export interface LocalApiRoutes {
+  readonly "GET /": {
+    readonly auth: "none";
+    readonly response: { readonly contentType: "text/html; charset=utf-8"; readonly body: string };
+  };
+  readonly "POST /api/v1/requests": {
+    readonly auth: "bearer";
+    readonly body: ClientRequest;
+    readonly response: ClientResponse;
+    readonly boundaryError: LocalHttpErrorResponse;
+  };
+  readonly "GET /api/v1/sessions/:sessionId/events": {
+    readonly auth: "bearer";
+    readonly params: { readonly sessionId: SessionId };
+    readonly query: { readonly afterSequence: number };
+    readonly response: AsyncIterable<SseFrame>;
+    readonly boundaryError: LocalHttpErrorResponse;
+  };
+  readonly "GET /healthz": {
+    readonly auth: "none";
+    readonly response: { readonly status: "ok"; readonly protocolVersion: 1 };
+  };
+}
+
+export interface HttpServerHandle {
+  readonly host: "127.0.0.1" | "::1";
+  readonly port: number;
+  stop(deadline: Timestamp): Promise<Result<void, IoError>>;
+}
 
 // -----------------------------------------------------------------------------
 // Module service interfaces
@@ -1245,7 +1477,7 @@ export interface ProjectRepository {
   getProject(id: ProjectId): Promise<Result<ProjectRecord, StoreError>>;
   getWorkspace(id: WorkspaceId): Promise<Result<WorkspaceRecord, StoreError>>;
   listProjects(page: PageRequest): Promise<Result<Page<ProjectRecord>, StoreError>>;
-  compareAndSetActiveHarness(projectId: ProjectId, expected: HarnessId, next: HarnessId): Promise<Result<ProjectRecord, StoreError>>;
+  compareAndSetActiveHarness(projectId: ProjectId, expected: HarnessId | null, next: HarnessId): Promise<Result<ProjectRecord, StoreError>>;
 }
 
 export interface SessionRepository {
@@ -1281,6 +1513,7 @@ export interface ModelRouter {
 export interface ExecutionPolicy {
   evaluate(evaluation: PolicyEvaluation): Promise<Result<PolicyDecision, ValidationError | ModelError>>;
   getEscalation(id: PolicyEscalationId): Promise<Result<PolicyEscalation, NotFoundError>>;
+  listEscalations(sessionId: SessionId, state: "pending" | "resolved", page: PageRequest): Promise<Result<Page<PolicyEscalation>, NotFoundError | ValidationError>>;
   resolve(request: PolicyResolutionRequest): Promise<Result<PolicyEscalation, NotFoundError | ConflictError | ValidationError>>;
 }
 
@@ -1304,8 +1537,8 @@ export interface HarnessRepository {
 
 export interface RunnerHost {
   start(start: RunnerStart): Promise<Result<ProcessHandle, HarnessError | ProcessError>>;
-  send(sessionId: SessionId, message: KernelToRunnerMessage): Promise<Result<void, HarnessError | ProcessError>>;
-  receive(sessionId: SessionId): AsyncIterable<RunnerToKernelMessage>;
+  send(sessionId: SessionId, envelope: KernelToRunnerEnvelope): Promise<Result<void, HarnessError | ProcessError>>;
+  receive(sessionId: SessionId): AsyncIterable<RunnerToKernelEnvelope>;
   stop(sessionId: SessionId, reason: string): Promise<Result<ProcessCompletion, HarnessError | ProcessError>>;
 }
 
@@ -1325,12 +1558,15 @@ export interface MarketplaceService {
   search(query: MarketplaceQuery): Promise<Result<readonly MarketplaceArtifact[], KnowledgeError>>;
   publish(artifact: MarketplaceArtifact): Promise<Result<MarketplaceArtifact, KnowledgeError>>;
   install(projectId: ProjectId, artifactId: MarketplaceArtifactId, capabilities: CapabilityEnvelope): Promise<Result<MarketplaceInstallation, KnowledgeError>>;
+  activateInstallation(evidence: MarketplaceCanaryEvidence, capabilities: CapabilityEnvelope): Promise<Result<MarketplaceInstallation, KnowledgeError | ValidationError>>;
+  transition(request: MarketplaceTransitionRequest, capabilities: CapabilityEnvelope): Promise<Result<MarketplaceArtifact, KnowledgeError>>;
   quarantine(artifactId: MarketplaceArtifactId, reason: string): Promise<Result<MarketplaceArtifact, KnowledgeError>>;
 }
 
 export interface EvolutionService {
   start(request: EvolutionRequest, capabilities: CapabilityEnvelope): Promise<Result<EvolutionJob, EvolutionError>>;
   get(id: EvolutionJobId): Promise<Result<EvolutionJob, EvolutionError>>;
+  list(projectId: ProjectId, page: PageRequest): Promise<Result<Page<EvolutionJob>, EvolutionError>>;
   cancel(id: EvolutionJobId, reason: string): Promise<Result<EvolutionJob, EvolutionError>>;
 }
 
@@ -1339,6 +1575,8 @@ export interface BenchmarkService {
   runTask(suiteId: BenchmarkSuiteId, taskId: BenchmarkTaskId, harnessId: HarnessId, route: ModelRouteSignature): Promise<Result<BenchmarkRun, EvolutionError>>;
   /** The evaluator is derived from the incumbent harness; callers cannot supply it. */
   runPaired(suiteId: BenchmarkSuiteId, incumbentId: HarnessId, candidateId: HarnessId): Promise<Result<PromotionScorecard, EvolutionError>>;
+  getScorecard(id: ScorecardId): Promise<Result<PromotionScorecard, EvolutionError>>;
+  listScorecards(projectId: ProjectId, page: PageRequest): Promise<Result<Page<PromotionScorecard>, EvolutionError>>;
   recordCanary(harnessId: HarnessId, source: CanarySource): Promise<Result<CanaryResult, EvolutionError>>;
 }
 
@@ -1353,6 +1591,60 @@ export interface OmegaApplication {
   start(): Promise<Result<void, InternalError | IoError | ValidationError>>;
   stop(deadline: Timestamp): Promise<Result<void, InternalError | IoError>>;
 }
+
+// Exact concrete-module export signatures used by the sole integrator.
+export type EnvironmentVariables = Readonly<Record<string, string | undefined>>;
+export type CreateFileObjectStore = (root: AbsolutePath) => ObjectStore;
+export type CreateFileProjectRepository = (root: AbsolutePath, objects: ObjectStore) => ProjectRepository;
+export type CreateFileSessionRepository = (root: AbsolutePath, objects: ObjectStore) => SessionRepository;
+export type CreateModelRouter = (config: OmegaConfig["models"], environment: EnvironmentVariables) => ModelRouter;
+export type CreateExecutionPolicy = (config: OmegaConfig["policy"], models: ModelRouter, stateRoot: AbsolutePath) => ExecutionPolicy;
+export type CreateProcessRuntime = (options: {
+  readonly config: OmegaConfig["processes"];
+  readonly environment: EnvironmentVariables;
+  readonly projects: ProjectRepository;
+  readonly sessions: SessionRepository;
+  readonly objects: ObjectStore;
+  readonly policy: ExecutionPolicy;
+}) => { readonly processes: ProcessSupervisor; readonly files: FileService };
+export type CreateHarnessRepository = (root: AbsolutePath, objects: ObjectStore, projects: ProjectRepository) => HarnessRepository;
+export type CreateRunnerHost = (processes: ProcessSupervisor, harnesses: HarnessRepository) => RunnerHost;
+export type CreateHarnessActivationService = (projects: ProjectRepository, harnesses: HarnessRepository) => HarnessActivationService;
+export type CreateInitialHarness = (project: ProjectRecord, objects: ObjectStore, projects: ProjectRepository) => Promise<Result<HarnessManifest, HarnessError>>;
+export type CreateSessionService = (options: {
+  readonly config: OmegaConfig["sessions"];
+  readonly repository: SessionRepository;
+  readonly projects: ProjectRepository;
+  readonly harnesses: HarnessRepository;
+  readonly runners: RunnerHost;
+  readonly processes: ProcessSupervisor;
+  readonly models: ModelRouter;
+  readonly policy: ExecutionPolicy;
+  readonly objects: ObjectStore;
+}) => SessionService;
+export type CreateKnowledgeService = (root: AbsolutePath, objects: ObjectStore) => KnowledgeService;
+export type CreateMarketplaceService = (root: AbsolutePath, objects: ObjectStore) => MarketplaceService;
+export type CreateBenchmarkService = (options: {
+  readonly root: AbsolutePath;
+  readonly objects: ObjectStore;
+  readonly sessions: SessionService;
+  readonly harnesses: HarnessRepository;
+  readonly activation: HarnessActivationService;
+  readonly launcher: BenchmarkRunLauncher;
+}) => BenchmarkService;
+export type CreateEvolutionService = (options: {
+  readonly root: AbsolutePath;
+  readonly sessions: SessionService;
+  readonly harnesses: HarnessRepository;
+  readonly benchmarks: BenchmarkService;
+  readonly activation: HarnessActivationService;
+}) => EvolutionService;
+export type CreateOmegaBenchManifest = (policy: PromotionEvalPolicy) => BenchmarkManifest;
+export type CreateOmegaClient = (baseUrl: string, bearerToken: string) => OmegaClient;
+export type RunCli = (argv: readonly string[], client: OmegaClient) => Promise<number>;
+export type RenderHtmlApp = (config: OmegaConfig["server"]) => string;
+export type CreateOmegaApplication = (config: OmegaConfig, environment: EnvironmentVariables) => OmegaApplication;
+export type StartHttpServer = (application: OmegaApplication, config: OmegaConfig["server"]) => Promise<Result<HttpServerHandle, IoError | ValidationError>>;
 
 /**
  * The sole wiring context. Leaf modules receive only the interfaces they need;

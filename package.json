@@ -2,6 +2,11 @@
   "name": "omega-dev",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fmktech/omega.dev.git"
+  },
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {

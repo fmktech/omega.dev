@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Omega.dev — Product Requirements Document</title>
+  <style>
+    :root {
+      --ink: #e9eef7;
+      --muted: #aab6c8;
+      --surface: #111827;
+      --surface-raised: #172033;
+      --page: #0a1020;
+      --line: #2b3852;
+      --accent: #7dd3fc;
+      --accent-strong: #38bdf8;
+      --green: #7ee2ad;
+      --amber: #f8c96a;
+      --violet: #c4b5fd;
+      --red: #fda4af;
+      --shadow: 0 18px 55px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% -10%, rgba(56, 189, 248, .14), transparent 32rem),
+        radial-gradient(circle at 90% 8%, rgba(196, 181, 253, .10), transparent 26rem),
+        var(--page);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    a { color: var(--accent); text-decoration-color: rgba(125, 211, 252, .45); }
+    a:hover { color: #fff; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 17rem;
+      gap: 3.2rem;
+      max-width: 88rem;
+      margin: 0 auto;
+      padding: 3rem 2rem 6rem;
+    }
+
+    main { min-width: 0; }
+
+    aside {
+      position: sticky;
+      top: 1.25rem;
+      align-self: start;
+      padding: 1.25rem;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: rgba(17, 24, 39, .76);
+      backdrop-filter: blur(16px);
+    }
+
+    aside p {
+      margin: 0 0 .65rem;
+      color: var(--muted);
+      font-size: .82rem;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: .33rem 0;
+      color: var(--muted);
+      font-size: .91rem;
+      text-decoration: none;
+    }
+
+    nav a:hover { color: var(--accent); }
+
+    .eyebrow {
+      margin: 0 0 .9rem;
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 {
+      color: #f8fbff;
+      letter-spacing: -.035em;
+      line-height: 1.12;
+    }
+
+    h1 {
+      max-width: 15ch;
+      margin: 0;
+      font-size: clamp(2.5rem, 7vw, 5.6rem);
+    }
+
+    h2 {
+      margin: 4.3rem 0 1.25rem;
+      padding-top: .2rem;
+      font-size: clamp(1.65rem, 3vw, 2.35rem);
+    }
+
+    h3 {
+      margin: 1.8rem 0 .55rem;
+      font-size: 1.12rem;
+    }
+
+    p { margin: .6rem 0 1rem; }
+
+    .lede {
+      max-width: 52rem;
+      margin-top: 1.25rem;
+      color: #c7d3e5;
+      font-size: clamp(1.12rem, 2vw, 1.35rem);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .7rem;
+      margin: 1.8rem 0 0;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .42rem;
+      padding: .32rem .68rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(23, 32, 51, .82);
+      font-size: .86rem;
+    }
+
+    .pill::before {
+      width: .45rem;
+      height: .45rem;
+      border-radius: 99px;
+      background: var(--accent);
+      content: "";
+    }
+
+    .pill.draft::before { background: var(--amber); }
+    .pill.local::before { background: var(--green); }
+
+    .hero-card, .callout, .card {
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: linear-gradient(145deg, rgba(23, 32, 51, .96), rgba(15, 23, 42, .92));
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card {
+      display: grid;
+      grid-template-columns: 1.05fr .95fr;
+      gap: 1.5rem;
+      margin-top: 2.6rem;
+      padding: 1.35rem;
+    }
+
+    .hero-card strong { color: #fff; }
+
+    .principle {
+      padding: 1.2rem;
+      border-radius: .75rem;
+      color: #d8e8f6;
+      background: rgba(56, 189, 248, .08);
+    }
+
+    .principle p:last-child { margin-bottom: 0; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      padding: 1.2rem 1.25rem;
+      box-shadow: none;
+    }
+
+    .card h3 { margin-top: 0; }
+    .card p:last-child { margin-bottom: 0; }
+
+    .number {
+      display: inline-grid;
+      width: 1.75rem;
+      height: 1.75rem;
+      place-items: center;
+      margin-bottom: .7rem;
+      border-radius: .48rem;
+      color: #06131d;
+      background: var(--accent);
+      font-size: .83rem;
+      font-weight: 900;
+    }
+
+    .callout {
+      margin: 1.35rem 0;
+      padding: 1rem 1.15rem;
+      border-left: 3px solid var(--accent);
+      box-shadow: none;
+    }
+
+    .callout.warning { border-left-color: var(--amber); }
+    .callout.success { border-left-color: var(--green); }
+    .callout strong { color: #fff; }
+
+    .architecture {
+      overflow-x: auto;
+      padding: 1.25rem;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      color: #d4e7f8;
+      background: #0b1325;
+      font: .86rem/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+
+    .timeline {
+      position: relative;
+      margin: 1.25rem 0 0;
+      padding-left: 1.5rem;
+      border-left: 1px solid var(--line);
+    }
+
+    .timeline > div {
+      position: relative;
+      padding: 0 0 1.4rem 1rem;
+    }
+
+    .timeline > div::before {
+      position: absolute;
+      top: .35rem;
+      left: -1.83rem;
+      width: .62rem;
+      height: .62rem;
+      border: 3px solid var(--page);
+      border-radius: 50%;
+      background: var(--accent);
+      content: "";
+    }
+
+    .timeline h3 { margin: 0 0 .2rem; }
+    .timeline p { color: var(--muted); }
+
+    ol.stories {
+      display: grid;
+      gap: .72rem;
+      padding-left: 1.35rem;
+    }
+
+    ol.stories li {
+      padding: .82rem 1rem;
+      border: 1px solid rgba(43, 56, 82, .9);
+      border-radius: .7rem;
+      background: rgba(17, 24, 39, .55);
+    }
+
+    ul, ol { padding-left: 1.3rem; }
+    li + li { margin-top: .45rem; }
+
+    .decision-list {
+      display: grid;
+      gap: .8rem;
+      padding: 0;
+      list-style: none;
+    }
+
+    .decision-list li {
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: .75rem;
+      background: rgba(17, 24, 39, .55);
+    }
+
+    .decision-list strong {
+      display: block;
+      margin-bottom: .2rem;
+      color: var(--violet);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: .85rem;
+      background: rgba(17, 24, 39, .52);
+    }
+
+    th, td {
+      padding: .82rem .9rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #dce8fa;
+      background: rgba(23, 32, 51, .92);
+      font-size: .82rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { color: #f1f5f9; font-weight: 700; }
+
+    .status {
+      display: inline-block;
+      margin-left: .45rem;
+      padding: .1rem .45rem;
+      border-radius: 999px;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .status.required { color: #092015; background: var(--green); }
+    .status.proposed { color: #211903; background: var(--amber); }
+    .status.protected { color: #250a10; background: var(--red); }
+
+    footer {
+      margin-top: 4rem;
+      padding-top: 1.4rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .9rem;
+    }
+
+    @media (max-width: 900px) {
+      .shell { display: block; padding: 2rem 1rem 4rem; }
+      aside { display: none; }
+      .hero-card, .grid, .grid.three { grid-template-columns: 1fr; }
+    }
+
+    @media print {
+      :root { --page: #fff; --ink: #121826; --muted: #4b5563; --surface: #fff; --surface-raised: #fff; --line: #d1d5db; }
+      body { background: #fff; }
+      aside { display: none; }
+      .shell { display: block; max-width: none; padding: .5in; }
+      h1, h2, h3, .card h3 { color: #111827; }
+      .hero-card, .callout, .card, table, .architecture, .decision-list li, ol.stories li { color: #172033; background: #fff; box-shadow: none; }
+      a { color: #075985; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <main>
+      <header id="top">
+        <p class="eyebrow">Product Requirements Document · v0.2</p>
+        <h1>Omega.dev</h1>
+        <p class="lede">A self-improving software-engineering agent that turns costly successful problem-solving into safely tested, reusable harness knowledge—connected to any compatible model provider or fully local compute.</p>
+        <div class="meta" aria-label="Document metadata">
+          <span class="pill draft">Draft for review</span>
+          <span class="pill local">Provider or local</span>
+          <span class="pill">10 July 2026</span>
+        </div>
+      </header>
+
+      <section class="hero-card" aria-label="Executive summary">
+        <div>
+          <p class="eyebrow">Product thesis</p>
+          <p>Omega is not an agent that rewrites its live runtime. It is a coding agent with a <strong>separate, durable evolution loop</strong>: task traces expose repeatable breakthroughs; bounded subagents distill them into candidate improvements; independent evaluation decides whether a project, domain, or global harness bundle should change.</p>
+        </div>
+        <div class="principle">
+          <p class="eyebrow">Operating principle</p>
+          <p><strong>Pay for a difficult solution once; retain only the transferable method.</strong></p>
+          <p>A successful patch is evidence. A verified procedure that helps earlier on related tasks is a reusable asset.</p>
+        </div>
+      </section>
+
+      <section id="problem">
+        <h2>Problem statement</h2>
+        <p>Software-engineering agents repeatedly rediscover techniques that they have already expensively learned. A long, exploratory trajectory may eventually solve an issue, but the useful turning point is trapped inside an unstructured trace. The next task—possibly in the same repository—pays the same cost again.</p>
+        <p>Existing agent harnesses also tend to be either fixed and generic, or dangerously self-modifying. Fixed harnesses cannot learn from repeated project experience. Unbounded self-modification risks corrupting permissions, weakening evaluation, leaking project information, or optimizing for an artificial benchmark instead of real engineering quality.</p>
+        <p>Omega must serve many projects without treating them as one shared context. It needs to preserve useful project knowledge, selectively generalize proven methods, and remain fully operable on a local machine without dependence on Vercel-managed infrastructure.</p>
+      </section>
+
+      <section id="solution">
+        <h2>Solution</h2>
+        <p>Omega is a CLI-driven SWE agent with two first-class model modes: any compatible model provider or fully local compute. It runs tasks in isolated sandboxes, records durable traces, and uses a controlled <em>evolve harness</em> workflow to turn recurring failures and costly breakthroughs into versioned, scope-aware harness bundles.</p>
+
+        <div class="architecture" aria-label="High-level architecture">
+Omega CLI
+    │
+    ▼
+Omega Runtime ────────────► Model Router (AI SDK v7)
+    │                               │
+    ├── Task harness                 └── Any compatible provider or local compute
+    ├── Execution Policy Gate
+    ├── Sandboxed project execution
+    ├── Durable local job manager
+    └── Evolution tool
+             │
+             ▼
+  Diagnostician · Mutator · Promotion Eval · Auditor subagents
+             │
+             ▼
+Local Evolution Registry
+  immutable bundles · trace artifacts · project profiles · evaluations · promotion pointers
+        </div>
+
+        <div class="grid three">
+          <article class="card">
+            <span class="number">1</span>
+            <h3>Task loop</h3>
+            <p>A pinned harness works on a repository task, verifies the outcome, and writes evidence-rich artifacts.</p>
+          </article>
+          <article class="card">
+            <span class="number">2</span>
+            <h3>Evolution loop</h3>
+            <p>A background workflow mines traces, proposes narrow changes, and evaluates candidates in isolation.</p>
+          </article>
+          <article class="card">
+            <span class="number">3</span>
+            <h3>Promotion loop</h3>
+            <p>In v0, an independent policy allows only human-approved project candidates that clear Promotion Eval.</p>
+          </article>
+        </div>
+
+        <div class="callout success">
+          <strong>Definition of success:</strong> a project candidate clears its Promotion Eval’s paired, minimum-effect, no-regression, cost, and policy criteria—not merely that a mutation was produced.
+        </div>
+      </section>
+
+      <section id="goals">
+        <h2>Goals</h2>
+        <div class="grid">
+          <article class="card">
+            <h3>Primary goals</h3>
+            <ul>
+              <li>Offer provider freedom: connect any compatible model provider or run fully local compute.</li>
+              <li>Capture high-value successful trajectories and crystallize transferable methods.</li>
+              <li>In v0, learn only at project scope; earn any later domain or global capability through separately designed cross-project evaluation.</li>
+              <li>Make every evolution proposal reproducible, inspectable, reversible, and attributable.</li>
+              <li>Use one named Promotion Eval protocol to compare incumbent and candidate harnesses against the same evidence and decision rule.</li>
+              <li>Use AI SDK v7 as a provider-neutral model router while agent code refers only to stable logical model roles.</li>
+              <li>Gate every side-effecting action through a tunable execution-policy decision that can allow, deny, or escalate it.</li>
+              <li>Offer a first-class terminal experience rather than exposing framework-specific commands.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Non-goals for v0</h3>
+            <ul>
+              <li>Unrestricted live self-modification of runtime code, tool permissions, or sandbox policy.</li>
+              <li>Domain/global promotion, automatic promotion, or cross-project learning in v0.</li>
+              <li>Mandatory use of Vercel, Vercel AI Gateway, or arbitrary third-party model-provider adapters.</li>
+              <li>Replacing a project’s CI, code review process, or human ownership model.</li>
+              <li>Training or changing base-model weights.</li>
+              <li>Claiming that a passing test suite alone establishes maintainable software quality.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="users">
+        <h2>Users and user stories</h2>
+        <h3>Primary users</h3>
+        <div class="grid three">
+          <article class="card">
+            <h3>Local developer</h3>
+            <p>Runs Omega in one or more repositories and wants faster, more reliable assistance without surrendering project data or control.</p>
+          </article>
+          <article class="card">
+            <h3>Agent operator</h3>
+            <p>Configures models, safety boundaries, budgets, sandbox backends, retention, and promotion policy.</p>
+          </article>
+          <article class="card">
+            <h3>Harness researcher</h3>
+            <p>Studies which workflows, skills, and model routes reliably improve engineering outcomes across a portfolio of projects.</p>
+          </article>
+        </div>
+
+        <h3>Detailed user stories</h3>
+        <ol class="stories">
+          <li>As a local developer, I want to ask Omega to solve a repository task from the terminal, so that I can use it without a hosted control plane.</li>
+          <li>As a local developer, I want Omega to run commands and tests in an isolated sandbox, so that a task cannot silently alter my host environment.</li>
+          <li>As a local developer, I want Omega to retain a compact project profile, so that it remembers validated commands, conventions, and pitfalls when I return.</li>
+          <li>As a local developer, I want project knowledge tied to a repository fingerprint and freshness marker, so that stale facts are revalidated rather than blindly trusted.</li>
+          <li>As a local developer, I want to inspect the trace behind a proposed lesson, so that I can understand why Omega believes it is reusable.</li>
+          <li>As a local developer, I want to trigger harness evolution from a completed run, so that hard-won breakthroughs can compound into future performance.</li>
+          <li>As a local developer, I want evolution to run asynchronously, so that normal task work is not blocked by exploratory subagents.</li>
+          <li>As a local developer, I want to see the pinned project harness version and its parent evidence, so that behavior is explainable and reproducible.</li>
+          <li>As a local developer, I want to pin or roll back a harness version, so that an unwanted behavioral change is reversible immediately.</li>
+          <li>As an operator, I want to choose any compatible model provider or local compute, so that I retain control over capability, cost, privacy, and model availability.</li>
+          <li>As an operator, I want each mode to make its network, cost, capability, and data-handling policy explicit, so that the choice stays under my control.</li>
+          <li>As an operator, I want model calls to use logical roles instead of raw model names, so that routing can change without rewriting agent behavior.</li>
+          <li>As an operator, I want every run to record the resolved model route and generation settings, so that outcome comparisons are meaningful.</li>
+          <li>As an operator, I want a model allowlist, cost budget, and capability policy, so that evolution cannot silently expand provider access or spend.</li>
+          <li>As an operator, I want the Promotion Eval route pinned independently of candidate routing, so that a candidate cannot optimize by manipulating its own judge.</li>
+          <li>As an operator, I want to tune an execution-policy profile from manual to guarded to autonomous, so that routine low-risk actions can proceed while meaningful risk is still escalated.</li>
+          <li>As a project owner, I want every proposed side effect to receive an explainable allow, deny, or approval-required verdict, so that I can audit why an action did or did not run.</li>
+          <li>As a project owner, I want hard-deny rules and mandatory approval rules to override the policy model, so that a cheap fast model never grants authority beyond my explicit policy.</li>
+          <li>As a harness researcher, I want Omega to distinguish failure clusters from one-off task difficulty, so that mutations address mechanisms rather than symptoms.</li>
+          <li>As a harness researcher, I want Omega to identify the turning point in a successful grind, so that it captures the method rather than copying a task-specific answer.</li>
+          <li>As a harness researcher, I want proposed changes to be narrow and diverse, so that experimentation remains interpretable and avoids duplicate variants.</li>
+          <li>As a harness researcher, I want candidates to replay relevant pre-breakthrough traces, so that the proposed lesson proves it would have helped earlier.</li>
+          <li>As a harness researcher, I want candidates tested through a sealed project Promotion Eval containing both target and regression tasks, so that fixing one known weakness does not regress general behavior.</li>
+          <li>As a harness researcher, I want one Promotion Eval to run incumbent and candidate harnesses on the same frozen task conditions, so that a promotion decision measures a real behavioral delta rather than task luck.</li>
+          <li>As a harness researcher, I want each Promotion Eval to require a configured minimum effect threshold and record cost and latency, so that small or expensive apparent wins do not compound into the active harness.</li>
+          <li>As a harness researcher, I want an abstract lesson to begin project-scoped, so that one project’s quirks do not become global behavior.</li>
+          <li>As an operator, I want cross-project promotion disabled in v0, so that Omega first proves safe project-scoped compounding before it attempts broader transfer.</li>
+          <li>As a project owner, I want raw source, secrets, and issue content to remain project-local, so that global learning cannot become a data-leak path.</li>
+          <li>As a project owner, I want global lessons to contain only redacted, abstracted procedures, so that shared knowledge preserves confidentiality boundaries.</li>
+          <li>As a project owner, I want privileged actions to remain approval-gated, so that agent learning cannot bypass human authority.</li>
+          <li>As a project owner, I want Omega to preserve rejected candidates and negative results, so that the system does not repeat failed experiments.</li>
+          <li>As a CLI user, I want concise run, evolution, memory, experiment, and promotion commands, so that routine operation does not require a web application.</li>
+          <li>As a CLI user, I want streaming status and a readable final decision summary, so that durable background work remains visible from the terminal.</li>
+        </ol>
+      </section>
+
+      <section id="decisions">
+        <h2>Implementation decisions</h2>
+        <ul class="decision-list">
+          <li>
+            <strong>Provider freedom or local compute <span class="status required">Required</span></strong>
+            Omega supports any compatible model provider through direct or OpenAI-compatible adapters, and also supports fully local compute. The operator owns provider selection, credentials, network policy, and model availability; Omega never introduces a proprietary model gateway or an implicit Vercel dependency.
+          </li>
+          <li>
+            <strong>Eve-inspired agent organization <span class="status required">Required</span></strong>
+            Omega adopts the separation of instructions, tools, skills, hooks, subagents, sandbox definition, evaluations, schedules, and channels. This is an organization specification, not a runtime dependency on Eve.
+          </li>
+          <li>
+            <strong>AI SDK v7 model router <span class="status required">Required</span></strong>
+            All model access passes through an explicit AI SDK provider registry and model-router policy. AI SDK is the internal abstraction that lets Omega use configured direct providers and local endpoints without Vercel AI Gateway as an implicit default.
+          </li>
+          <li>
+            <strong>Execution Policy Agent <span class="status required">Required</span></strong>
+            Before a side-effecting tool call runs, a deterministic gate evaluates hard policy and sends a structured action intent to a cheap, fast policy-model role. Its verdict is <em>allow</em>, <em>deny</em>, or <em>escalate</em>, with confidence, reasons, and any constraints. Hard-deny rules, mandatory approvals, and low-confidence decisions always override an allow verdict.
+          </li>
+          <li>
+            <strong>Tunable autonomy profiles <span class="status required">Required</span></strong>
+            Operators choose a bounded manual, guarded, or autonomous profile at global and project scope. A child scope may narrow autonomy but may never exceed the protected maximum set by its parent. Irreversible, sensitive, or externally consequential action classes remain non-auto-approvable.
+          </li>
+          <li>
+            <strong>Logical model roles <span class="status required">Required</span></strong>
+            Task agents, evolution proposers, triage workers, embeddings, Promotion Eval, policy-agent, and promotion-agent roles ask for named capabilities and budgets. The router resolves each role to a pinned configured provider/model route and records the resolution in the trace.
+          </li>
+          <li>
+            <strong>Trusted control plane <span class="status protected">Protected</span></strong>
+            Sandbox policy, execution-policy hard rules and maximum autonomy, permissions, provider credentials, Promotion Eval, policy-agent and promotion-agent routes, retention policy, and promotion rules are not editable by the agent evolution loop.
+          </li>
+          <li>
+            <strong>Mutable harness bundles <span class="status required">Required</span></strong>
+            Evolution produces immutable, content-addressed bundles containing only approved mutable surfaces: skill/playbook content, contextual retrieval rules, bounded workflow strategy, and task/mutator role-selection policy. Bundles cannot alter Promotion Eval, policy-agent, or promotion-agent routing.
+          </li>
+          <li>
+            <strong>Remote-style local registry, not local Git as source of truth <span class="status required">Required</span></strong>
+            The authoritative history is an append-only registry of bundle manifests, parent relationships, trace artifacts, evaluation records, and promotion pointers. Ephemeral workspaces may exist for task execution but do not version the harness.
+          </li>
+          <li>
+            <strong>Scope hierarchy <span class="status required">Required</span></strong>
+            V0 composes protected core policy, one project bundle, and task-local scratch state. Domain and global bundle layers are architecture placeholders only: they remain disabled until a separate cross-project evaluation and privacy design is approved. No scope can override protected controls.
+          </li>
+          <li>
+            <strong>Project profile as bounded memory <span class="status required">Required</span></strong>
+            Each project has an access-controlled, compact profile containing repository identity, last validated state, known-good commands, confirmed conventions, verified pitfalls, linked lessons, confidence, and retention metadata. Every entry records the source run and verification that justified it; new entries are unverified until executed successfully, decay over time, and are policy-gated writes.
+          </li>
+          <li>
+            <strong>Crystallization before broad mutation <span class="status required">Required</span></strong>
+            A costly successful trajectory first becomes a candidate procedural lesson. It becomes a project harness mutation only after the Promotion Eval demonstrates that it improves a reusable method rather than memorizing an answer.
+          </li>
+          <li>
+            <strong>Promotion Eval <span class="status required">Required</span></strong>
+            Promotion Eval is Omega’s single promotion-evidence protocol, not a separate feature. It runs the incumbent and candidate harnesses against the same frozen project task conditions and pinned route class, compares success, verification quality, cost, and latency, then applies configured replicate and minimum-effect rules. A sealed project eval set is the initial mode; prospective evaluation on future real tasks is the second mode when replay is not available.
+          </li>
+          <li>
+            <strong>Route-bound evidence <span class="status required">Required</span></strong>
+            A harness bundle’s evidence is bound to its model-route class. Changing the task or mutator route marks the bundle unverified for that route until it passes the Promotion Eval again. Local mode must meet an explicit evaluation/diagnostician capability floor before evolution is enabled.
+          </li>
+          <li>
+            <strong>Bounded evolution workflow <span class="status required">Required</span></strong>
+            The main agent invokes an asynchronous evolution tool with evidence, a goal, allowed surfaces, scope constraints, and a budget. The tool coordinates diagnostician, mutator, promotion-evaluation, and auditor roles in isolated executions.
+          </li>
+          <li>
+            <strong>Independent promotion policy <span class="status protected">Protected</span></strong>
+            A candidate must meet its Promotion Eval’s paired, minimum-effect, cost, and no-regression criteria. V0 promotion is always human-approved and project-scoped; it is a policy decision, not an agent action.
+          </li>
+          <li>
+            <strong>Privacy-preserving generalization <span class="status required">Required</span></strong>
+            Raw project artifacts remain scoped. Any proposed cross-project lesson must be abstracted and redacted before it enters a shared candidate bundle.
+          </li>
+        </ul>
+      </section>
+
+      <section id="modules">
+        <h2>Core modules and contracts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Module</th>
+              <th>Responsibility</th>
+              <th>Stable contract</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CLI</td>
+              <td>Starts tasks, follows durable work, inspects memory and experiments, requests promotion or rollback.</td>
+              <td>Human-oriented commands and streamed status; never exposes internal framework plumbing as the public interface.</td>
+            </tr>
+            <tr>
+              <td>Runtime</td>
+              <td>Composes the pinned harness, task context, tools, permissions, and sandbox session.</td>
+              <td>Runs a task against an immutable harness resolution and emits structured trace artifacts.</td>
+            </tr>
+            <tr>
+              <td>Model Router</td>
+              <td>Resolves logical roles to approved AI SDK v7 provider models, applies budgets and middleware, records attribution.</td>
+              <td>Returns a capability-appropriate model route or a policy-visible refusal; never exposes credentials to agent logic.</td>
+            </tr>
+            <tr>
+              <td>Execution Policy Gate</td>
+              <td>Normalizes a proposed side effect into an action intent, applies deterministic rules, invokes the low-latency policy-model role when permitted, and records the decision.</td>
+              <td>Returns allow, deny, or escalate with reasons, confidence, and constraints. It cannot override a hard rule or required human approval.</td>
+            </tr>
+            <tr>
+              <td>Sandbox Adapter</td>
+              <td>Creates isolated project execution environments using a locally controlled backend such as Docker or Podman.</td>
+              <td>Runs bounded commands and returns output/artifacts under a declared network, filesystem, and resource policy.</td>
+            </tr>
+            <tr>
+              <td>Trace Store</td>
+              <td>Persists task evidence, task-start repository/environment snapshot, tool outcomes, observed sandbox effects, model attribution, diffs, test results, and user approvals.</td>
+              <td>Writes immutable trace records addressable by run and artifact identifiers. V0 snapshots enough state to reproduce a Promotion Eval task; it does not claim arbitrary mid-trajectory replay.</td>
+            </tr>
+            <tr>
+              <td>Project Memory</td>
+              <td>Maintains concise, freshness-aware, access-controlled repository profiles and project-scoped lessons.</td>
+              <td>Returns verified or explicitly unverified context with source-run provenance, confidence, and expiry—not unbounded historical chat.</td>
+            </tr>
+            <tr>
+              <td>Evolution Orchestrator</td>
+              <td>Schedules diagnosis, mutation, evaluation, audit, and result aggregation as a durable local job.</td>
+              <td>Accepts a bounded evolution request and returns an inspectable experiment identity and lifecycle state.</td>
+            </tr>
+            <tr>
+              <td>Harness Registry</td>
+              <td>Stores immutable candidate bundles, lineage, evaluation outcomes, scope, and promotion pointers.</td>
+              <td>Resolves a pinned bundle set for a task and atomically promotes or rolls back named pointers.</td>
+            </tr>
+            <tr>
+              <td>Promotion Eval</td>
+              <td>Runs incumbent and candidate harnesses against the same frozen task conditions, evaluates verification quality, cost, latency, and policy conformance, and supports a sealed-set or prospective mode.</td>
+              <td>Produces a route-bound, comparable scorecard with replicate outcomes, effect size, threshold result, and evidence provenance.</td>
+            </tr>
+            <tr>
+              <td>Promotion Policy</td>
+              <td>Applies Promotion Eval acceptance rules, redaction checks, v0 project-scope restriction, and mandatory human approval.</td>
+              <td>Accepts or rejects a candidate with machine-readable reasons; does not allow candidates to alter the policy or self-promote.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="promotion-eval">
+        <h2>Promotion Eval</h2>
+        <p>Promotion Eval is the evidence system behind every harness promotion. It compares a candidate against the active incumbent under matched conditions; it is not a second product loop or a vague “held-out check.”</p>
+
+        <div class="architecture" aria-label="Promotion evaluation protocol">
+Frozen project task snapshot + verifier + pinned route class + fixed resource policy
+                                  │
+                    ┌─────────────┴─────────────┐
+                    ▼                           ▼
+          incumbent harness run         candidate harness run
+                    │                           │
+                    └─────────────┬─────────────┘
+                                  ▼
+    paired scorecard: verified outcome · cost · latency · policy conformance
+                                  │
+                                  ▼
+ configured replicates + minimum effect threshold + no-regression rule
+                                  │
+                                  ▼
+            human-approved project promotion / rejection / canary
+        </div>
+
+        <div class="grid">
+          <article class="card">
+            <h3>Sealed project mode</h3>
+            <p>Before a promotion, Omega evaluates on a compact, content-hash-sealed project task set. Task snapshots, verifier configuration, and route class are pinned. Diagnostician and mutator roles receive results, not hidden task contents.</p>
+          </article>
+          <article class="card">
+            <h3>Prospective mode</h3>
+            <p>When historical replay is unavailable, Omega tests a manually approved candidate on the next eligible real tasks alongside an incumbent baseline. This is a second mode of the same Promotion Eval, not a weaker untracked learning path.</p>
+          </article>
+          <article class="card">
+            <h3>Decision rule</h3>
+            <p>Each scorecard records matched runs, verified task outcome, cost, latency, route class, and policy behavior. A candidate must clear configured replicate, minimum-effect, and no-regression thresholds before a human may promote it.</p>
+          </article>
+          <article class="card">
+            <h3>Scope of truth</h3>
+            <p>Evidence proves only the tested project bundle under the tested route class. A route change, composition change, or future cross-project scope marks the lesson unverified until a relevant Promotion Eval succeeds.</p>
+          </article>
+        </div>
+
+        <div class="callout warning">
+          <strong>V0 truthfulness rule:</strong> if Omega cannot reproduce an earlier task from a frozen task-start snapshot, it does not claim that a lesson would have changed that historical trajectory. It uses sealed or prospective Promotion Eval instead.
+        </div>
+      </section>
+
+      <section id="execution-policy">
+        <h2>Execution Policy Agent</h2>
+        <p>Omega treats approval as a runtime decision, not an afterthought. The task agent proposes an action, but the execution-policy gate bases enforcement on the actual tool invocation and observed sandbox capabilities—not on the agent’s self-description.</p>
+
+        <div class="architecture" aria-label="Execution policy decision flow">
+Task agent proposes an action
+        │
+        ▼
+Action adapter derives actual command, paths, mounts, egress, and side effects
+        │
+        ▼
+Deterministic policy check ── hard deny / mandatory approval? ──► deny or escalate
+        │
+        ▼
+Fast Policy Agent (cheap, pinned model role)
+        │
+        ▼
+allow · deny · escalate + confidence + reasons + constraints
+        │
+        ▼
+Protected decision merger ──► executor or human approval request
+        </div>
+
+        <div class="grid">
+          <article class="card">
+            <h3>Action intent</h3>
+            <p>Every proposed side effect is normalized from the actual tool operation: command, target paths and hosts, mounts, egress, expected diff, project scope, and existing approval. The agent’s stated purpose is optional context, never trusted evidence.</p>
+          </article>
+          <article class="card">
+            <h3>Fast policy role</h3>
+            <p>The policy agent uses a small, low-latency, structured-output model role. It classifies contextual risk from observed action facts that static rules cannot fully capture, but it is not itself the source of authority.</p>
+          </article>
+          <article class="card">
+            <h3>Decision semantics</h3>
+            <p><strong>Allow</strong> permits only an action class already eligible for automatic execution. <strong>Deny</strong> prevents the action. <strong>Escalate</strong> pauses work and asks the configured human or higher-authority policy for a decision.</p>
+          </article>
+          <article class="card">
+            <h3>Autonomy profiles</h3>
+            <p><strong>Manual</strong> escalates all side effects. <strong>Guarded</strong> auto-allows reversible, project-local low-risk work. <strong>Autonomous</strong> expands eligible classes within hard caps; it never bypasses protected denials or mandatory approval classes.</p>
+          </article>
+        </div>
+
+        <div class="callout warning">
+          <strong>Safety invariant:</strong> model confidence and agent-reported intent are not permission. An allow result is effective only when observed sandbox behavior and deterministic policy also permit the action; uncertainty defaults to escalation rather than silent execution.
+        </div>
+      </section>
+
+      <section id="evolution">
+        <h2>Evolution and crystallization workflow</h2>
+        <p>Evolution is not invoked for every task. It begins after an explicit request, a verified repeated failure pattern, or a high-cost successful run whose trace contains a plausible turning point.</p>
+
+        <div class="timeline">
+          <div>
+            <h3>Collect evidence</h3>
+            <p>Store the pinned harness version, resolved model route, task context, tool outcomes, verification results, user approvals, and final artifact. Mark both failures and expensive successes as candidates for analysis.</p>
+          </div>
+          <div>
+            <h3>Mine mechanism, not symptom</h3>
+            <p>A diagnostician separates terminal outcome from causal behavior. “Timeout” is not enough; the system identifies the decision, missing context, workflow gap, or tool-use pattern that caused it.</p>
+          </div>
+          <div>
+            <h3>Extract the turning point</h3>
+            <p>For a successful grind, identify the observation or procedure that transformed the search. Remove repository-specific facts and state the smallest reusable method.</p>
+          </div>
+          <div>
+            <h3>Propose bounded candidates</h3>
+            <p>Mutator subagents create diverse candidate bundle changes within declared editable surfaces. They may not edit protected runtime or Promotion Eval components.</p>
+          </div>
+          <div>
+            <h3>Replay and transfer-test</h3>
+            <p>Run the Promotion Eval. If a frozen task-start snapshot and sufficient checkpoint exist, compare incumbent and candidate on it; otherwise use the sealed project set or prospective mode. The system never substitutes an after-the-fact narrative for measured replay evidence.</p>
+          </div>
+          <div>
+            <h3>Audit and promote</h3>
+            <p>Accept only project-scoped candidates that clear the Promotion Eval’s effect, regression, cost, privacy, route, and policy rules, then obtain human approval. Record rejected candidates and negative results so failed avenues are not re-run blindly.</p>
+          </div>
+        </div>
+
+        <div class="callout warning">
+          <strong>Anti-overfitting rule:</strong> a task solution does not become an active project lesson because it passed once. It must clear the Promotion Eval; domain and global promotion are disabled in v0.
+        </div>
+      </section>
+
+      <section id="scope">
+        <h2>Knowledge scope and promotion</h2>
+        <div class="callout success">
+          <strong>V0 active scope:</strong> only Task → Project promotion exists. Domain and global layers remain deliberately inactive architecture placeholders until their own cross-project evaluation, privacy, and economics case is approved.
+        </div>
+        <div class="architecture" aria-label="Scope hierarchy">
+Protected control plane
+        │
+        ▼
+Global methods ───── transferable debugging, verification, context discipline
+        │
+        ▼
+Domain methods ───── language, framework, monorepo, toolchain families
+        │
+        ▼
+Project methods ──── repository conventions, validated commands, architecture
+        │
+        ▼
+Task scratch ─────── ephemeral investigation, never promoted automatically
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Promotion</th>
+              <th>Evidence required</th>
+              <th>Data rule</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Task → Project</td>
+              <td>Human-approved Promotion Eval improvement, with a verified reusable procedure and route-bound scorecard.</td>
+              <td>May retain project-local context under project retention policy. <strong>Active in v0.</strong></td>
+            </tr>
+            <tr>
+              <td>Project → Domain <span class="status proposed">Post-v0</span></td>
+              <td>Positive transfer across multiple permitted projects with a dedicated cross-project Promotion Eval.</td>
+              <td>Only abstracted, redacted procedure enters the candidate; human approval is mandatory.</td>
+            </tr>
+            <tr>
+              <td>Domain → Global <span class="status proposed">Post-v0</span></td>
+              <td>Positive transfer across diverse held-out projects with no material regression.</td>
+              <td>No raw project material; human approval is mandatory.</td>
+            </tr>
+            <tr>
+              <td>Any scope → Rollback</td>
+              <td>A reproducible regression, policy violation, or operator decision.</td>
+              <td>Keep history and reason; move pointer to prior bundle atomically.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="cli">
+        <h2>CLI experience</h2>
+        <p>The CLI is Omega’s primary product surface. It is a thin local client to the runtime and registry, not a replacement for the agent’s sandbox or a wrapper around Vercel tooling.</p>
+        <div class="grid">
+          <article class="card">
+            <h3>Core task operations</h3>
+            <ul>
+              <li>Start a task in the current project.</li>
+              <li>Stream task and tool progress in a concise terminal view.</li>
+              <li>Inspect a trace, resolved harness bundle, model route, and verification result.</li>
+              <li>Resume or cancel a durable local task where policy permits.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Evolution operations</h3>
+            <ul>
+              <li>Request evolution from a run, failure cluster, or explicit goal.</li>
+              <li>List, inspect, compare, and cancel experiments.</li>
+              <li>Run or inspect a Promotion Eval showing incumbent/candidate results, route class, effect threshold, and cost.</li>
+              <li>Promote, pin, or roll back a scoped bundle subject to policy.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Memory and policy operations</h3>
+            <ul>
+              <li>Inspect, refresh, or forget a project profile.</li>
+              <li>View data-retention scope and linked lessons.</li>
+              <li>Inspect effective model routing and configured budgets.</li>
+              <li>Export a local, redacted experiment report.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Operator operations</h3>
+            <ul>
+              <li>Configure local sandbox backend, approved providers, and model allowlists.</li>
+              <li>Set spending, time, concurrency, and network policies.</li>
+              <li>Manage Promotion Eval suites and promotion requirements.</li>
+              <li>Back up or migrate the local registry without relying on a hosted platform.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="testing">
+        <h2>Testing decisions</h2>
+        <p>Tests should assert externally observable behavior and durable invariants, not incidental internal implementation. Every test fixture must pin its harness bundle, Promotion Eval configuration, model route or deterministic substitute, and sandbox policy.</p>
+        <div class="grid">
+          <article class="card">
+            <h3>Unit and contract tests</h3>
+            <ul>
+              <li>Model-router capability, allowlist, budget, fallback, and attribution behavior.</li>
+              <li>Execution-policy decision precedence: hard deny and approval requirements always override policy-model allow results.</li>
+              <li>Execution-policy adapters derive decisions from observed command, mount, path, and egress facts rather than agent-reported intent.</li>
+              <li>Scope resolution, precedence, freshness, provenance, expiry, and retention behavior for project memory.</li>
+              <li>Bundle lineage, content addressing, promotion atomicity, and rollback correctness.</li>
+              <li>Policy enforcement that rejects edits to protected surfaces, including Promotion Eval, policy-agent, and promotion-agent routes.</li>
+              <li>CLI command contracts and machine-readable status output.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Integration tests</h3>
+            <ul>
+              <li>Local daemon, database, artifact store, CLI, and Docker/Podman sandbox in one repeatable environment.</li>
+              <li>Action intents are logged and an escalation reliably pauses execution until a configured approval arrives.</li>
+              <li>Durable evolution jobs survive interruption and preserve inspectable partial evidence.</li>
+              <li>Multiple subagents remain isolated and cannot share unapproved project artifacts.</li>
+              <li>Local-provider execution works without a network gateway.</li>
+              <li>Project profile storage and deletion follow configured data scope.</li>
+              <li>A route change invalidates prior candidate evidence until the relevant Promotion Eval re-runs.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Evaluation tests</h3>
+            <ul>
+              <li>Sealed project task snapshots measure incumbent/candidate verified success, verification quality, cost, and latency under the same route class.</li>
+              <li>Promotion Eval uses configured matched replicates, a minimum effect threshold, a no-regression rule, and a fixed evaluation-compute budget.</li>
+              <li>Promotion Eval runs the exact effective bundle composition; any later composition change invalidates its scorecard until re-evaluated.</li>
+              <li>Prospective mode tracks a manually approved candidate on future eligible project tasks and can quarantine it on regression.</li>
+              <li>Historical replay is tested only where a frozen task-start snapshot and sufficient checkpoint exist; otherwise the scorecard states that replay was unavailable.</li>
+              <li>Adversarial suite probes Promotion Eval gaming, test overfitting, privilege escalation, and data leakage.</li>
+              <li>Adversarial suite includes repository-content prompt injection against the Execution Policy Gate.</li>
+              <li>Policy calibration suite measures false allows, false denials, escalation rate, latency, and policy-model cost by action class.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Acceptance criteria</h3>
+            <ul>
+              <li>A promoted candidate has a complete, inspectable lineage and scorecard.</li>
+              <li>Its Promotion Eval clears the configured paired-run, minimum-effect, and no-regression requirements.</li>
+              <li>Its bound model route and resource cost remain inside policy.</li>
+              <li>It contains no protected-surface change or prohibited project data.</li>
+              <li>It is project-scoped and manually approved in v0.</li>
+              <li>Rollback restores the previous effective behavior deterministically.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="safety">
+        <h2>Safety, privacy, and governance</h2>
+        <div class="grid">
+          <article class="card">
+            <h3>Permission boundary</h3>
+            <p>Evolution agents may read approved traces and modify only declared candidate surfaces in isolated environments. They cannot broaden network access, modify host policy, install credentials, alter Promotion Eval, or activate a candidate directly.</p>
+          </article>
+          <article class="card">
+            <h3>Execution boundary</h3>
+            <p>The Execution Policy Agent classifies every side effect, but deterministic rules and configured human gates retain final authority. Policy-model failures, timeouts, and uncertainty resolve to denial or escalation according to the active profile.</p>
+          </article>
+          <article class="card">
+            <h3>Privacy boundary</h3>
+            <p>Project profiles and traces are local by default. Promotion beyond a project requires a redaction pass, provenance, and evidence that the result is procedural rather than proprietary.</p>
+          </article>
+          <article class="card">
+            <h3>Reward boundary</h3>
+            <p>Promotion Eval combines matched verification outcomes with regression, cost, latency, policy, route, and audit signals. Sealed task contents are unavailable to the roles proposing candidates; the system must never treat an agent-authored score change as sufficient proof of improvement.</p>
+          </article>
+          <article class="card">
+            <h3>Human boundary</h3>
+            <p>Configured approval gates remain available for repository writes, external side effects, domain/global promotion, and any risk category the operator chooses.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="rollout">
+        <h2>Phased rollout</h2>
+        <div class="timeline">
+          <div>
+            <h3>Phase 0 — Contract and local baseline</h3>
+            <p>Define the agent directory specification, trusted/mutable boundary, local registry schema, CLI vocabulary, protected model roles, frozen task-start snapshot format, sealed project eval-set format, Promotion Eval metrics, and a reproducible baseline task harness.</p>
+          </div>
+          <div>
+            <h3>Phase 1 — Useful local SWE agent</h3>
+            <p>Deliver task execution, sandbox integration, trace capture, provider-agnostic/local model routing, the Execution Policy Agent, provenance-aware project profiles, Promotion Eval scorecards, and the core CLI.</p>
+          </div>
+          <div>
+            <h3>Phase 2 — Inspectable evolution</h3>
+            <p>Add asynchronous evolution jobs, trace distillation, narrow project-scoped skill candidates, sealed and prospective Promotion Eval modes, experiment inspection, manual promotion/rollback, and post-promotion canary/quarantine.</p>
+          </div>
+          <div>
+            <h3>Phase 3 — Evaluate the case for transfer</h3>
+            <p>Only if project-scoped lessons show positive realized savings, design a separate cross-project evaluation, privacy, redaction, and human-approval system before enabling domain bundles or scope escalation.</p>
+          </div>
+          <div>
+            <h3>Phase 4 — Bounded workflow and router evolution</h3>
+            <p>Allow candidates to improve approved workflow strategy and task/mutator model-role selection within fixed resource and Promotion Eval constraints. Maintain a diverse candidate population only if evaluation quality supports it.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="out-of-scope">
+        <h2>Out of scope</h2>
+        <ul>
+          <li>General autonomous software deployment without configured approval and repository policy.</li>
+          <li>Editing model weights, fine-tuning pipelines, or claiming recursive improvement of base-model intelligence.</li>
+          <li>Cross-tenant or cross-user global learning without explicit policy, redaction, and consent mechanisms.</li>
+          <li>Domain/global promotion, automatic promotion, or arbitrary mid-trajectory replay in v0.</li>
+          <li>Distributed cloud orchestration as a requirement for v0.</li>
+          <li>Bespoke first-party integration work for a provider that lacks an AI SDK-compatible or OpenAI-compatible adapter; provider adapters remain a pluggable extension point.</li>
+          <li>Replacing expert review of maintainability, product intent, security architecture, or organizational ownership.</li>
+        </ul>
+      </section>
+
+      <section id="open-questions">
+        <h2>Further notes and open decisions</h2>
+        <div class="grid">
+          <article class="card">
+            <h3>Local model baseline</h3>
+            <p>Select a first supported local model/runtime combination and define the minimum tool-calling, context, and structured-output capabilities required for Omega’s task, diagnostician, and Promotion Eval roles.</p>
+          </article>
+          <article class="card">
+            <h3>Sandbox default</h3>
+            <p>Select Docker or Podman as the first backend and define the default network, filesystem mount, image provenance, and resource limits.</p>
+          </article>
+          <article class="card">
+            <h3>Evaluation corpus</h3>
+            <p>Define a private, representative, content-hash-sealed starting corpus of repository tasks and regression scenarios. A trustworthy eval set is a prerequisite for meaningful evolution.</p>
+          </article>
+          <article class="card">
+            <h3>Promotion Eval calibration</h3>
+            <p>Set the initial matched-replicate count, minimum effect threshold, no-regression rule, false-promotion tolerance, and evaluation-compute budget. These are promotion-policy inputs, not values the evolving harness may change.</p>
+          </article>
+          <article class="card">
+            <h3>Promotion authority</h3>
+            <p>V0 is fixed: only project-scoped, human-approved promotion. Decide later whether a measured canary can reduce review burden without permitting autonomous or cross-project promotion.</p>
+          </article>
+          <article class="card">
+            <h3>Execution-policy baseline</h3>
+            <p>Define the initial hard-deny classes, mandatory approval classes, autonomy profiles, and the quality/cost target for the fast policy-model role. A conservative default is guarded mode with automatic execution only for reversible project-local actions.</p>
+          </article>
+          <article class="card">
+            <h3>Retention and portability</h3>
+            <p>Define default retention duration, encryption-at-rest expectations, selective deletion semantics, and a portable backup/export format for local users.</p>
+          </article>
+          <article class="card">
+            <h3>Definition of domain</h3>
+            <p>Define whether domains are manually configured, inferred from project metadata, or both. Initial promotion should prefer explicit domain membership over inference alone.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        <p><strong>Omega.dev PRD v0.2.</strong> This document captures the current product direction: an Eve-inspired, AI SDK v7-routed SWE agent that works with any compatible model provider or fully local compute, whose project-scoped evolution is evidence-driven by Promotion Eval and bounded by a trusted control plane.</p>
+      </footer>
+    </main>
+
+    <aside aria-label="Table of contents">
+      <p>On this page</p>
+      <nav>
+        <a href="#top">Overview</a>
+        <a href="#problem">Problem</a>
+        <a href="#solution">Solution</a>
+        <a href="#goals">Goals</a>
+        <a href="#users">Users &amp; stories</a>
+        <a href="#decisions">Decisions</a>
+        <a href="#modules">Modules</a>
+        <a href="#promotion-eval">Promotion eval</a>
+        <a href="#execution-policy">Execution policy</a>
+        <a href="#evolution">Evolution</a>
+        <a href="#scope">Scope</a>
+        <a href="#cli">CLI</a>
+        <a href="#testing">Testing</a>
+        <a href="#safety">Safety</a>
+        <a href="#rollout">Rollout</a>
+        <a href="#out-of-scope">Out of scope</a>
+        <a href="#open-questions">Open decisions</a>
+      </nav>
+    </aside>
+  </div>
+</body>
+</html>

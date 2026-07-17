@@ -45,6 +45,10 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
     const context = getContext();
     try {
       for await (const envelope of context.runners.receive(sessionId)) {
+        if (envelope.message.kind === "runner.protocol-error") {
+          await context.sessions.completeFromRunner(sessionId, "failed");
+          break;
+        }
         if (envelope.message.kind !== "runner.request") continue;
         await dispatch(sessionId, envelope.message.request);
       }
@@ -300,7 +304,6 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
     const context = getContext();
     for await (const event of events) {
       context.sessions.publishRunnerEvent({ kind: "model-delta", sessionId, event });
-      await sendEvent(sessionId, { kind: "model.event", event });
       if (event.kind === "completed") await recordModelCompletion(sessionId, harnessId, event.completion);
       if (event.kind === "failed") await context.sessions.recordRunnerEvent(sessionId, {
         kind: "model.failed",
@@ -308,6 +311,9 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
         error: event.error,
         partialArtifactId: event.partialArtifactId,
       }, harnessId);
+      // Persist terminal model evidence before the runner can react by completing
+      // its session. Evolution consumes the append-only log, not the live stream.
+      await sendEvent(sessionId, { kind: "model.event", event });
     }
   }
 

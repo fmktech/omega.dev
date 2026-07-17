@@ -375,6 +375,7 @@ describe("session service", () => {
     const childSession = await f.repository.get(child.value.sessionId);
     expect(childSession.ok && childSession.value.header.threadId).toBe(parent.value.header.threadId);
     expect(childSession.ok && childSession.value.header.parentSessionId).toBe(parent.value.header.id);
+    expect(childSession.ok && childSession.value.header.initialModelRoutes[0]?.role).toBe("diagnostician");
     const spawn = (f.repository.events.get(parent.value.header.id) ?? []).find((event) => event.payload.kind === "child.spawned");
     expect(spawn?.payload.kind === "child.spawned" && spawn.payload.child.spawnEventId).toBe(child.value.spawnEventId);
     expect(spawn?.id).toBe(child.value.spawnEventId);

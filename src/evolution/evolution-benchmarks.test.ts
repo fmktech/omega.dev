@@ -447,14 +447,14 @@ describe("paired promotion evaluation", () => {
     comparisonOrder: ["invariants", "capability", "cost", "latency"],
   };
 
-  it("invalidates actual provider, quantization, fixture, budget, policy, and component mismatches", () => {
+  it("invalidates environmental mismatches while allowing the harness delta under test", () => {
     const incumbent = run("i", incumbentId, taskId, true);
     expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), route: { ...route, servingProvider: "provider-b" } })).toBe("different-serving-provider");
     expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), route: { ...route, quantization: "int8" } })).toBe("different-quantization");
     expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), fixtureObjectHash: "other" as ObjectHash })).toBe("different-fixture");
     expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), effectiveBudget: { ...incumbent.effectiveBudget, maxModelCalls: 2 } })).toBe("different-budget");
     expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), executionPolicyComponentId: "other" as ComponentId })).toBe("different-policy");
-    expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), harnessComponentObjectHashes: ["other" as ObjectHash] })).toBe("different-component-set");
+    expect(findPairInvalidReason(incumbent, { ...run("c", candidateId, taskId, true), harnessComponentObjectHashes: ["other" as ObjectHash] })).toBeNull();
     expect(pairReplicateRuns([incumbent], [run("c1", candidateId, taskId, true), run("c2", candidateId, taskId, true)])[0]?.invalidReason).toBe("unequal-replicates");
   });
 
@@ -667,8 +667,9 @@ describe("evolution lifecycle", () => {
         ok: true,
         value: rejectedScorecard(candidate),
       }));
+      const spawnChild = vi.fn<SessionService["spawnChild"]>(async () => ({ ok: true, value: fakeChildSession() }));
       const sessions = fakeSessionService({
-        spawnChild: async () => ({ ok: true, value: fakeChildSession() }),
+        spawnChild,
         cancel: async () => ({ ok: true, value: fakeCompletedChildRecord() }),
       });
       const options = {
@@ -691,6 +692,9 @@ describe("evolution lifecycle", () => {
       }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
       expect(started.ok).toBe(true);
       if (!started.ok) return;
+      const childEnvelope = spawnChild.mock.calls[0]?.[0].capabilityEnvelope;
+      expect(childEnvelope?.grants.every((grant) => grant.kind === "read-files")).toBe(true);
+      expect(childEnvelope?.maxProcessStarts).toBe(0);
       const terminal = await waitForEvolutionTerminal(service, started.value.id);
 
       expect(terminal.ok && terminal.value.state).toBe("rejected");

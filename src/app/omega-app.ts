@@ -652,8 +652,38 @@ async function execute(context: OmegaContext, request: ClientRequest): Promise<C
       return response(context, request, await context.evolution.get(request.jobId), (job) => ({ kind: "evolution", job }));
     case "evolution.list":
       return response(context, request, await context.evolution.list(request.projectId, request.page), (page) => ({ kind: "evolutions", page }));
+    case "evolution.retry":
+      return response(context, request, await context.evolution.retry(request.jobId), (job) => ({ kind: "evolution", job }));
     case "evolution.cancel":
       return response(context, request, await context.evolution.cancel(request.jobId, request.reason), (job) => ({ kind: "evolution", job }));
+    case "benchmark.run-task": {
+      const configured = context.config.models.routes.find((route) => route.role === "promotion-evaluator");
+      if (configured === undefined) {
+        return errorResponse(context, request, {
+          kind: "validation",
+          message: "The promotion-evaluator route is not configured.",
+          field: "models.routes",
+          recoverable: true,
+          callerAction: "fix-request",
+        });
+      }
+      const route: ModelRouteSignature = {
+        role: configured.role,
+        providerId: configured.providerId,
+        modelId: configured.modelId,
+        variant: null,
+        servingProvider: null,
+        quantization: null,
+        reasoning: configured.reasoning,
+        temperature: configured.temperature,
+        topP: configured.topP,
+        seed: configured.seed,
+        contextLimit: configured.contextLimit,
+        outputLimit: configured.maxOutputTokens,
+        equivalentListPrice: configured.equivalentListPrice,
+      };
+      return response(context, request, await context.benchmarks.runTask(request.suiteId, request.taskId, request.harnessId, route), (run) => ({ kind: "benchmark-run", run }));
+    }
     case "benchmark.run-paired":
       return response(context, request, await context.benchmarks.runPaired(request.suiteId, request.incumbentId, request.candidateId), (scorecard) => ({ kind: "scorecard", scorecard }));
     case "scorecard.get":

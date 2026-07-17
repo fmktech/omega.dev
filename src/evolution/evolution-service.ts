@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   ArtifactId,
   CapabilityEnvelope,
+  CapabilityGrant,
   ComponentId,
   ComponentKind,
   ComponentManifest,
@@ -96,14 +97,42 @@ function pageFrom(items: readonly EvolutionJob[], page: PageRequest): Result<Pag
 }
 
 function evolutionObjective(request: EvolutionRequest): string {
+  const exampleKind = request.allowedComponentKinds[0] ?? "skill";
+  const exampleRuntime = exampleKind === "runner" ? "node" : "document";
+  const exampleEntrypoint = exampleKind === "runner" ? "runner.js" : "SKILL.md";
   return [
     request.goal,
-    "Return the proposed harness mutation as the entire final response in this JSON shape:",
-    '{"kind":"skill","runtime":"document","entrypoint":"SKILL.md","content":"...","replaceComponentId":null}',
+    "Work under a strict synthesis budget. Inspect only the minimum named incumbent source needed, at most once per file. Do not inspect benchmark implementations, verifier assets, or broad contracts.",
+    "This is a proposal-only child: after the single necessary file.read, every tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response.",
+    "Make the smallest complete mutation that addresses the supplied evidence. Do not repeatedly restate or plan the solution.",
+    "Return the proposed harness mutation as the entire final response in this JSON shape, with no prose or code fence:",
+    JSON.stringify({ kind: exampleKind, runtime: exampleRuntime, entrypoint: exampleEntrypoint, content: "...", replaceComponentId: null }),
     `Allowed component kinds: ${request.allowedComponentKinds.join(", ")}.`,
     "Use replaceComponentId to replace an existing component; omit it or use null to add a non-singleton component.",
-    "The content must be complete executable or document content, not a description of the change.",
+    "For a runner mutation, content is the complete executable runner artifact, not the TypeScript factory that embeds it.",
+    "The content must be complete executable or document content, not a patch or description of the change.",
   ].join("\n\n");
+}
+
+function evolutionChildCapabilities(parent: CapabilityEnvelope, request: EvolutionRequest): CapabilityEnvelope {
+  const grants: CapabilityGrant[] = [];
+  for (const grant of parent.grants) {
+    switch (grant.kind) {
+      case "read-files": grants.push({ kind: grant.kind, pathPrefixes: [...grant.pathPrefixes] }); break;
+      default: break;
+    }
+  }
+  return {
+    grants,
+    modelRoles: parent.modelRoles.filter((role) => role === "main-coder" || role === "harness-mutator"),
+    maxCostUsdMicros: request.budget.maxCostUsdMicros <= parent.maxCostUsdMicros ? request.budget.maxCostUsdMicros : parent.maxCostUsdMicros,
+    maxModelCalls: Math.min(request.budget.maxModelCalls, parent.maxModelCalls),
+    maxProcessStarts: 0,
+    maxInputTokens: request.budget.maxInputTokens <= parent.maxInputTokens ? request.budget.maxInputTokens : parent.maxInputTokens,
+    maxOutputTokens: request.budget.maxOutputTokens <= parent.maxOutputTokens ? request.budget.maxOutputTokens : parent.maxOutputTokens,
+    wallTimeMs: request.budget.wallTimeMs <= parent.wallTimeMs ? request.budget.wallTimeMs : parent.wallTimeMs,
+    createdAt: now(),
+  };
 }
 
 function canonical(value: JsonValue): string {
@@ -156,14 +185,51 @@ function isSafeEntrypoint(entrypoint: string): boolean {
   return entrypoint.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
 }
 
+function embeddedJsonObjects(source: string): readonly string[] {
+  const objects: string[] = [];
+  for (let start = 0; start < source.length; start += 1) {
+    if (source[start] !== "{") continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') quoted = false;
+        continue;
+      }
+      if (character === '"') quoted = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          objects.push(source.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return objects;
+}
+
 function parseDelta(text: string, allowedKinds: readonly ComponentKind[]): Result<ComponentDelta, EvolutionError> {
   let source = text.trim();
   const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/u.exec(source);
   if (fenced?.[1] !== undefined) source = fenced[1].trim();
   let value: unknown;
-  try {
-    value = JSON.parse(source);
-  } catch {
+  let parsed = false;
+  for (const candidate of [source, ...embeddedJsonObjects(source)]) {
+    try {
+      value = JSON.parse(candidate);
+      parsed = true;
+      break;
+    } catch {
+      // Models occasionally prefix the required object with a short explanation.
+    }
+  }
+  if (!parsed) {
     return { ok: false, error: validation("Evolution child output must be one JSON component delta.", "childOutput") };
   }
   if (!isRecord(value) || typeof value["kind"] !== "string" || typeof value["runtime"] !== "string"
@@ -237,6 +303,18 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
 
   function isCancelled(id: EvolutionJobId): boolean {
     return jobs.get(id)?.state === "cancelled";
+  }
+
+  function schedule(job: EvolutionJob): void {
+    const controller = new AbortController();
+    const finished = Promise.withResolvers<void>();
+    controls.set(job.id, { controller, completion: finished.promise });
+    queueMicrotask(() => {
+      void execute(job.id, controller.signal).finally(() => {
+        finished.resolve();
+        controls.delete(job.id);
+      });
+    });
   }
 
   async function finishFailed(id: EvolutionJobId): Promise<void> {
@@ -315,7 +393,9 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       kind: delta.kind,
       runtime: delta.runtime,
       objectHash: object.value.hash,
-      entrypoint: delta.entrypoint,
+      entrypoint: delta.kind === "runner" && delta.runtime !== "native"
+        ? `inline-base64:${bytes.toString("base64")}`
+        : delta.entrypoint,
       credentialEnvNames: replaced?.credentialEnvNames ?? [],
       capabilities: replaced?.capabilities ?? [],
     };
@@ -428,7 +508,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       role: "evolution",
       objective: evolutionObjective(request),
       contextArtifactIds: request.evidenceArtifactIds,
-      capabilityEnvelope: capabilities,
+      capabilityEnvelope: evolutionChildCapabilities(capabilities, request),
     });
     if (!child.ok) return child;
 
@@ -447,16 +527,27 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     };
     const persisted = await store(job);
     if (!persisted.ok) return persisted;
-    const controller = new AbortController();
-    const finished = Promise.withResolvers<void>();
-    controls.set(job.id, { controller, completion: finished.promise });
-    queueMicrotask(() => {
-      void execute(job.id, controller.signal).finally(() => {
-        finished.resolve();
-        controls.delete(job.id);
-      });
-    });
+    schedule(job);
     return { ok: true, value: job };
+  }
+
+  async function retry(id: EvolutionJobId): Promise<Result<EvolutionJob, EvolutionError>> {
+    const ready = await ensureLoaded();
+    if (!ready.ok) return ready;
+    const job = jobs.get(id);
+    if (job === undefined) return { ok: false, error: notFound(id) };
+    if (job.state !== "failed" && job.state !== "cancelled") {
+      return { ok: false, error: validation("Only a failed or cancelled evolution job can be retried.", "jobId") };
+    }
+    const child = await options.repository.get(job.sessionId);
+    if (!child.ok) return child;
+    if (child.value.outcome !== "succeeded") {
+      return { ok: false, error: validation("Evolution retry requires a succeeded proposal child.", "jobId") };
+    }
+    const queued = await store({ ...job, state: "queued", candidateHarnessId: null, scorecardId: null, updatedAt: now() });
+    if (!queued.ok) return queued;
+    schedule(queued.value);
+    return queued;
   }
 
   async function get(id: EvolutionJobId): Promise<Result<EvolutionJob, EvolutionError>> {
@@ -497,7 +588,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     return { ok: false, error: cancellationError(session.error) };
   }
 
-  return { start, get, list, cancel };
+  return { start, retry, get, list, cancel };
 };
 
 async function persistJob(root: string, job: EvolutionJob): Promise<void> {

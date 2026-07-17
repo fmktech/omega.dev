@@ -31,13 +31,6 @@ function sameBudget(left: BenchmarkRun["effectiveBudget"], right: BenchmarkRun["
     && left.maxProcessStarts === right.maxProcessStarts;
 }
 
-function sameComponentSet(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
 export function findPairInvalidReason(incumbent: BenchmarkRun, candidate: BenchmarkRun): PairInvalidReason | null {
   if (
     incumbent.route.providerId !== candidate.route.providerId
@@ -59,7 +52,7 @@ export function findPairInvalidReason(incumbent: BenchmarkRun, candidate: Benchm
   }
   if (incumbent.route.servingProvider !== candidate.route.servingProvider) return "different-serving-provider";
 
-  if (incumbent.route.quantization === null || candidate.route.quantization === null) {
+  if ((incumbent.route.quantization === null) !== (candidate.route.quantization === null)) {
     return "provider-metadata-missing";
   }
   if (incumbent.route.quantization !== candidate.route.quantization) return "different-quantization";
@@ -71,9 +64,9 @@ export function findPairInvalidReason(incumbent: BenchmarkRun, candidate: Benchm
     incumbent.promotionPolicyId !== candidate.promotionPolicyId
     || incumbent.executionPolicyComponentId !== candidate.executionPolicyComponentId
   ) return "different-policy";
-  if (!sameComponentSet(incumbent.harnessComponentObjectHashes, candidate.harnessComponentObjectHashes)) {
-    return "different-component-set";
-  }
+  // The harness component delta is the experimental variable. Each run records
+  // its pinned component hashes for audit; requiring equality here would make
+  // every genuine harness mutation incomparable by construction.
   return null;
 }
 

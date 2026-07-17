@@ -13,6 +13,7 @@ import type {
   KernelToRunnerEnvelope,
   LiveEventEnvelope,
   ModelError,
+  ModelRole,
   PersistedEventPayload,
   ProcessError,
   ProcessId,
@@ -69,6 +70,16 @@ class LiveQueue {
   close(): void {
     this.closed = true;
     while (this.waiters.length > 0) this.waiters.shift()?.(null);
+  }
+}
+
+function childModelRole(role: SpawnChildRequest["role"]): ModelRole {
+  switch (role) {
+    case "evolution": return "harness-mutator";
+    case "promotion-eval": return "promotion-evaluator";
+    case "diagnostician": return "diagnostician";
+    case "crystallizer": return "crystallizer";
+    case "task": return "main-coder";
   }
 }
 
@@ -375,6 +386,10 @@ export const createSessionService: CreateSessionService = (options) => {
       const createdAt = now();
       const envelope = attenuateChildCapabilities(parent.value.header.capabilityEnvelope, request.capabilityEnvelope, createdAt);
       if (!envelope.ok) return envelope;
+      const route = await options.models.resolve(childModelRole(request.role));
+      if (!route.ok) {
+        return validation(`Child model route could not be resolved: ${route.error.kind}`, "role");
+      }
       const decision = await options.policy.evaluate({
         sessionId: parent.value.header.id,
         facts: { kind: "child-spawn", parentSessionId: parent.value.header.id, requestedGrants: envelope.value.grants },
@@ -415,7 +430,7 @@ export const createSessionService: CreateSessionService = (options) => {
         role: request.role,
         objective: request.objective.trim(),
         initialHarnessId: harness.value.id,
-        initialModelRoutes: [...parent.value.header.initialModelRoutes],
+        initialModelRoutes: [route.value],
         policyProfile: parent.value.header.policyProfile,
         capabilityEnvelope: envelope.value,
         credentialEnvNames: childCredentialNames(parent.value.header, envelope.value),

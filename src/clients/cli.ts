@@ -3,6 +3,7 @@ import type {
   ArtifactId,
   BenchmarkBudget,
   BenchmarkSuiteId,
+  BenchmarkTaskId,
   ByteCount,
   ClientRequest,
   ComponentKind,
@@ -58,8 +59,10 @@ Knowledge and marketplace
 Evolution and evaluation
   evolutions <project-id> [cursor] [limit]
   evolution <job-id>
+  evolution-retry <job-id>
   evolution-cancel <job-id> <reason...>
   evolution-start <project-id> <source-session-id> <goal> <wall-ms> <model-calls> <input-tokens> <output-tokens> <cost-micros> <processes> [evidence-csv] [component-kinds-csv]
+  benchmark <suite-id> <task-id> <harness-id>
   paired <suite-id> <incumbent-harness-id> <candidate-harness-id>
   scorecards <project-id> [cursor] [limit]
   scorecard <scorecard-id>`;
@@ -136,6 +139,7 @@ function createRequest(argv: readonly string[]): ClientRequest {
     }
     case "evolutions": return { kind: "evolution.list", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, page: page(argv, 2) };
     case "evolution": return { kind: "evolution.get", requestId: id, jobId: required(argv, 1, "job ID") as EvolutionJobId };
+    case "evolution-retry": return { kind: "evolution.retry", requestId: id, jobId: required(argv, 1, "job ID") as EvolutionJobId };
     case "evolution-cancel": return { kind: "evolution.cancel", requestId: id, jobId: required(argv, 1, "job ID") as EvolutionJobId, reason: reason(argv, 2) };
     case "evolution-start": {
       const budget: BenchmarkBudget = {
@@ -148,6 +152,7 @@ function createRequest(argv: readonly string[]): ClientRequest {
       };
       return { kind: "evolution.start", requestId: id, request: { projectId: required(argv, 1, "project ID") as ProjectId, sourceSessionId: required(argv, 2, "source session ID") as SessionId, goal: required(argv, 3, "goal"), budget, evidenceArtifactIds: csv(argv[10]) as readonly ArtifactId[], allowedComponentKinds: enumValues(csv(argv[11]), COMPONENT_KINDS, "component kind") } };
     }
+    case "benchmark": return { kind: "benchmark.run-task", requestId: id, suiteId: required(argv, 1, "suite ID") as BenchmarkSuiteId, taskId: required(argv, 2, "task ID") as BenchmarkTaskId, harnessId: required(argv, 3, "harness ID") as HarnessId };
     case "paired": return { kind: "benchmark.run-paired", requestId: id, suiteId: required(argv, 1, "suite ID") as BenchmarkSuiteId, incumbentId: required(argv, 2, "incumbent harness ID") as HarnessId, candidateId: required(argv, 3, "candidate harness ID") as HarnessId };
     case "scorecards": return { kind: "scorecard.list", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, page: page(argv, 2) };
     case "scorecard": return { kind: "scorecard.get", requestId: id, scorecardId: required(argv, 1, "scorecard ID") as ScorecardId };

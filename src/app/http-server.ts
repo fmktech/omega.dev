@@ -28,7 +28,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u;
 const REQUEST_KINDS: ReadonlySet<string> = new Set([
   "project.list", "project.register-workspace", "task.start", "thread.resume", "session.get", "session.list",
   "artifact.read", "session.cancel", "policy.list", "policy.resolve", "evolution.start", "evolution.get",
-  "evolution.list", "evolution.cancel", "benchmark.run-paired", "scorecard.get", "scorecard.list",
+  "evolution.list", "evolution.retry", "evolution.cancel", "benchmark.run-task", "benchmark.run-paired", "scorecard.get", "scorecard.list",
   "knowledge.catalog", "knowledge.read", "marketplace.search", "marketplace.transition", "harness.get",
   "harness.list", "harness.rollback", "harness.pin",
 ]);
@@ -272,7 +272,11 @@ function parseClientRequest(text: string): ClientRequest {
       validatePage(request["page"]);
       break;
     case "evolution.get": requireId(request["jobId"], "jobId"); break;
+    case "evolution.retry": requireId(request["jobId"], "jobId"); break;
     case "evolution.cancel": requireId(request["jobId"], "jobId"); requireString(request["reason"], "reason"); break;
+    case "benchmark.run-task":
+      requireId(request["suiteId"], "suiteId"); requireId(request["taskId"], "taskId"); requireId(request["harnessId"], "harnessId");
+      break;
     case "benchmark.run-paired":
       requireId(request["suiteId"], "suiteId"); requireId(request["incumbentId"], "incumbentId"); requireId(request["candidateId"], "candidateId");
       break;

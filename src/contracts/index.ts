@@ -1405,7 +1405,9 @@ export type ClientRequest =
   | { readonly kind: "evolution.start"; readonly requestId: RequestId; readonly request: EvolutionRequest }
   | { readonly kind: "evolution.get"; readonly requestId: RequestId; readonly jobId: EvolutionJobId }
   | { readonly kind: "evolution.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
+  | { readonly kind: "evolution.retry"; readonly requestId: RequestId; readonly jobId: EvolutionJobId }
   | { readonly kind: "evolution.cancel"; readonly requestId: RequestId; readonly jobId: EvolutionJobId; readonly reason: string }
+  | { readonly kind: "benchmark.run-task"; readonly requestId: RequestId; readonly suiteId: BenchmarkSuiteId; readonly taskId: BenchmarkTaskId; readonly harnessId: HarnessId }
   | { readonly kind: "benchmark.run-paired"; readonly requestId: RequestId; readonly suiteId: BenchmarkSuiteId; readonly incumbentId: HarnessId; readonly candidateId: HarnessId }
   | { readonly kind: "scorecard.get"; readonly requestId: RequestId; readonly scorecardId: ScorecardId }
   | { readonly kind: "scorecard.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
@@ -1428,6 +1430,7 @@ export type ClientResponseValue =
   | { readonly kind: "policy-escalations"; readonly page: Page<PolicyEscalation> }
   | { readonly kind: "evolution"; readonly job: EvolutionJob }
   | { readonly kind: "evolutions"; readonly page: Page<EvolutionJob> }
+  | { readonly kind: "benchmark-run"; readonly run: BenchmarkRun }
   | { readonly kind: "scorecard"; readonly scorecard: PromotionScorecard }
   | { readonly kind: "scorecards"; readonly page: Page<PromotionScorecard> }
   | { readonly kind: "knowledge-catalog"; readonly entries: readonly KnowledgeCatalogEntry[] }
@@ -1602,6 +1605,7 @@ export interface MarketplaceService {
 
 export interface EvolutionService {
   start(request: EvolutionRequest, capabilities: CapabilityEnvelope): Promise<Result<EvolutionJob, EvolutionError>>;
+  retry(id: EvolutionJobId): Promise<Result<EvolutionJob, EvolutionError>>;
   get(id: EvolutionJobId): Promise<Result<EvolutionJob, EvolutionError>>;
   list(projectId: ProjectId, page: PageRequest): Promise<Result<Page<EvolutionJob>, EvolutionError>>;
   cancel(id: EvolutionJobId, reason: string): Promise<Result<EvolutionJob, EvolutionError>>;

@@ -175,6 +175,24 @@ describe("runCli", () => {
     expect(calls).toEqual(["session.list"]);
   });
 
+  it("dispatches one model-marked benchmark task", async () => {
+    const client: OmegaClient = {
+      async request(request) {
+        expect(request).toMatchObject({
+          kind: "benchmark.run-task",
+          suiteId: "omegabench-10@1",
+          taskId: "offline-dependency@1",
+          harnessId: "harness-1",
+        });
+        return success(request.requestId);
+      },
+      async *events() { return; },
+    };
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await expect(runCli(["benchmark", "omegabench-10@1", "offline-dependency@1", "harness-1"], client)).resolves.toBe(0);
+  });
+
   it("returns 130 when SIGINT interrupts an idle watch", async () => {
     let finish: ((value: IteratorResult<LiveEventEnvelope>) => void) | null = null;
     const iterator: AsyncIterator<LiveEventEnvelope> = {

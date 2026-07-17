@@ -93,6 +93,9 @@ describe("harness runtime", () => {
     expect(runner?.entrypoint.startsWith("inline-base64:")).toBe(true);
     if (runner === undefined) return;
     const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    expect(source).toContain("cpuTimeLimitMs:1800000");
+    expect(source).not.toContain("cpuTimeLimitMs:3600000");
+    expect(source).toContain('role:route?.role||"main-coder"');
     const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
     const lines = lineReader(child.stdout);
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) } })}\n`);
@@ -182,6 +185,7 @@ describe("harness runtime", () => {
       return;
     }
     expect(supervisor.startedSpecs[0]?.executable).toBe("node");
+    expect(supervisor.startedSpecs[0]?.sandbox.filesystem).toBe("workspace-read-only");
     expect(supervisor.startedSpecs[0]?.sandbox.cpuTimeLimitMs).toBeLessThanOrEqual(1_800_000);
     const received = host.receive("session-runner" as SessionId)[Symbol.asyncIterator]();
     expect((await received.next()).value?.message.kind).toBe("runner.ready");

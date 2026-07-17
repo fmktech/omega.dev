@@ -111,14 +111,14 @@ describe("model routing", () => {
     if (result.ok) {
       expect(result.value).toMatchObject({
         providerId: "openrouter",
-        modelId: "nvidia/nemotron-3-ultra-550b-a55b:free",
-        variant: "free",
+        modelId: "deepseek/deepseek-v4-flash",
+        variant: null,
         contextLimit: 1_000_000,
-        outputLimit: 32_768,
+        outputLimit: 16_384,
         equivalentListPrice: {
-          inputUsdMicrosPerMillionTokens: 500_000,
-          cachedInputUsdMicrosPerMillionTokens: 100_000,
-          outputUsdMicrosPerMillionTokens: 2_200_000,
+          inputUsdMicrosPerMillionTokens: 90_000,
+          cachedInputUsdMicrosPerMillionTokens: 90_000,
+          outputUsdMicrosPerMillionTokens: 180_000,
         },
       });
     }
@@ -158,13 +158,13 @@ describe("model routing", () => {
     expect(captured).toHaveLength(1);
     expect(captured[0]).toMatchObject({
       apiKey: "test-key",
-      temperature: undefined,
+      temperature: 0,
       maxOutputTokens: 128,
       reasoning: "high",
       timeoutMs: 10_000,
     });
     expect(captured[0]?.modelSettings).toMatchObject({
-      provider: { allow_fallbacks: true, require_parameters: true, data_collection: "allow" },
+      provider: { order: ["GMICloud"], allow_fallbacks: false, require_parameters: true, data_collection: "allow" },
       usage: { include: true },
     });
     expect(events).toEqual([

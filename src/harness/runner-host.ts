@@ -385,6 +385,8 @@ function runnerProcessSpec(
   const inline = entrypoint.startsWith("inline-base64:") ? Buffer.from(entrypoint.slice("inline-base64:".length), "base64").toString("utf8") : null;
   const command = runtime === "node" ? "node" : runtime === "python" ? "python3" : runtime === "bash" ? "bash" : entrypoint;
   const args = runtime === "native" ? [] : inline === null ? [entrypoint] : ["--input-type=module", "--eval", inline];
+  const writable = start.session.capabilityEnvelope.grants.some((grant) =>
+    grant.kind === "write-files" && grant.pathPrefixes.some((prefix) => String(prefix) === "."));
   return {
     executable: command,
     args,
@@ -393,7 +395,7 @@ function runnerProcessSpec(
     stdin: "pipe",
     timeoutMs: null,
     sandbox: {
-      filesystem: "workspace-read-write",
+      filesystem: writable ? "workspace-read-write" : "workspace-read-only",
       network: "none",
       allowedHosts: [],
       memoryLimitBytes: (512 * 1024 * 1024) as ByteCount,

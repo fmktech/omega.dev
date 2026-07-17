@@ -40,7 +40,7 @@ function request(value,done){const requestId="runner-"+(++requestSequence);pendi
 function finish(outcome){request({kind:"session.complete",outcome},()=>{process.exitCode=outcome==="succeeded"?0:1;setImmediate(()=>process.exit())})}
 function modelRequest(){
   const route=start.session.initialModelRoutes.find(route=>route.role==="main-coder")||start.session.initialModelRoutes[0];
-  request({kind:"model.start",request:{sessionId:start.session.id,harnessId:currentHarnessId,role:"main-coder",messages,tools,maxOutputTokens:Math.min(Number(route?.outputLimit||32768),Number(start.session.capabilityEnvelope.maxOutputTokens)),abortAfterMs:Number(start.session.capabilityEnvelope.wallTimeMs)}},reply=>{
+  request({kind:"model.start",request:{sessionId:start.session.id,harnessId:currentHarnessId,role:route?.role||"main-coder",messages,tools,maxOutputTokens:Math.min(Number(route?.outputLimit||32768),Number(start.session.capabilityEnvelope.maxOutputTokens)),abortAfterMs:Number(start.session.capabilityEnvelope.wallTimeMs)}},reply=>{
     if(!reply.result?.ok){finish("failed");return}
     activeStream=reply.result.value.streamId;toolCalls=new Map();
   });
@@ -50,7 +50,7 @@ function toolRequest(call){
   switch(call.toolName){
     case "file.read":return {kind:"file.read",workspaceId:workspace.id,path:input.path};
     case "file.write":return {kind:"file.write",request:{sessionId:session.id,workspaceId:workspace.id,path:input.path,expectedSha:input.expectedSha??null,content:String(input.content??"")}};
-    case "process.start":return {kind:"process.start",spec:{executable:String(input.executable??""),args:Array.isArray(input.args)?input.args.map(String):[],cwd:input.cwd||workspace.path,credentialEnvNames:Array.isArray(input.credentialEnvNames)?input.credentialEnvNames:[],stdin:input.stdin==="closed"?"closed":"pipe",timeoutMs:input.timeoutMs??null,sandbox:input.sandbox||{filesystem:"workspace-read-write",network:"none",allowedHosts:[],memoryLimitBytes:536870912,cpuTimeLimitMs:3600000,runtime:{kind:"oci",image:"omega-runner:local",expectedImageDigest:null,containerUser:"1000:1000",workspaceMountPath:"/workspace"}},harnessId:currentHarnessId,sessionId:session.id}};
+    case "process.start":return {kind:"process.start",spec:{executable:String(input.executable??""),args:Array.isArray(input.args)?input.args.map(String):[],cwd:input.cwd||workspace.path,credentialEnvNames:Array.isArray(input.credentialEnvNames)?input.credentialEnvNames:[],stdin:input.stdin==="closed"?"closed":"pipe",timeoutMs:input.timeoutMs??null,sandbox:input.sandbox||{filesystem:"workspace-read-write",network:"none",allowedHosts:[],memoryLimitBytes:536870912,cpuTimeLimitMs:1800000,runtime:{kind:"oci",image:"omega-runner:local",expectedImageDigest:null,containerUser:"1000:1000",workspaceMountPath:"/workspace"}},harnessId:currentHarnessId,sessionId:session.id}};
     case "process.observe":return {kind:"process.observe",processId:input.processId,after:Array.isArray(input.after)?input.after:[]};
     case "process.input":return {kind:"process.input",processId:input.processId,input:input.input};
     case "process.cancel":return {kind:"process.cancel",processId:input.processId,reason:String(input.reason||"cancelled by agent")};

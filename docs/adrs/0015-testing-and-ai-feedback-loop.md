@@ -7,7 +7,7 @@
 
 Omega contains deterministic software infrastructure and a stochastic AI agent. Treating both as one test suite would either make ordinary CI slow and flaky or reduce agent evaluation to implementation-shaped unit tests. The central product claim is also unusual: a project-owned harness should learn to make an economical model more effective, especially when the project's environment contradicts the harness's familiar assumptions.
 
-Benchmark results are meaningless when runs from different models, providers, reasoning modes, or budgets are combined as if they were equivalent. The initial feedback loop must be small enough to run often under a free OpenRouter route while still exposing consequential harness weaknesses.
+Benchmark results are meaningless when runs from different models, providers, reasoning modes, or budgets are combined as if they were equivalent. The initial feedback loop must be small enough to run often under an economical OpenRouter or local route while still exposing consequential harness weaknesses.
 
 ## Decision
 
@@ -84,13 +84,21 @@ Every live-model benchmark result records a model-route signature containing at 
 - execution-policy and benchmark-suite versions;
 - task budget and workspace-fixture hash.
 
-The initial development route is:
+The first attempted development route was:
 
 ```text
 openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
 ```
 
-The free route is a bootstrap constraint, not a timeless product default. A later route starts a new benchmark series.
+That availability probe ended in a provider idle timeout, so it produced no comparable benchmark series. The first completed and promoted series instead used:
+
+```text
+openrouter:deepseek/deepseek-v4-flash
+serving-provider:GMICloud
+reasoning:high temperature:0 output-limit:16384
+```
+
+The automatic execution-policy gate used `openrouter:openai/gpt-oss-20b`; its decisions are policy evidence and never pooled with task-capability evidence. Model routes are bootstrap configuration, not timeless product defaults. Any route or serving-provider change starts a new benchmark series.
 
 Results are comparable for promotion only when the material fields of their route signatures match. In particular:
 
@@ -130,7 +138,7 @@ Thresholds and statistical rules are defined by the incumbent Promotion Eval und
 - Model and provider changes cannot silently manufacture an apparent harness improvement.
 - Ten tasks provide diagnostic speed rather than broad external validity; later external suites are still needed.
 - Hidden verifiers, fixture secrecy, and versioning must prevent the evolution loop from memorizing benchmark answers.
-- The free OpenRouter route requires local throttling and explicit treatment of provider availability.
+- OpenRouter routes require local throttling and explicit treatment of provider availability, cost, and data policy.
 
 ## Alternatives considered
 
@@ -140,4 +148,3 @@ Thresholds and statistical rules are defined by the incumbent Promotion Eval und
 - **Make the ten tasks large real-world projects:** rejected because slow reset and ambiguous failure attribution weaken the feedback loop.
 - **Test only happy-path conventional repositories:** rejected because Omega's value is adapting its harness when ordinary assumptions fail.
 - **Run live model calls in normal unit CI:** rejected because cost, availability, and stochasticity would make the correctness suite unreliable.
-

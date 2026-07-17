@@ -9,6 +9,7 @@ This repository is an early implementation. The runtime contract is strict and t
 - One local daemon shared by the HTML client and `omega` CLI.
 - Project-scoped harness lineages stored in Omega's content-addressed state, not in a project's Git history.
 - Direct OpenRouter and local/provider-adapter routing through AI SDK v7. There is no implicit Vercel AI Gateway or “Omega provider.”
+- Separate model roles: DeepSeek V4 Flash is the current coding/evolution route and GPT-OSS-20B is the cheap automatic execution-policy gate.
 - A model-assisted execution policy with deterministic capability bounds and fail-closed sandbox enforcement.
 - One isolated OCI process per runner or tool, with live stdin/stdout/stderr observation.
 - SHA-bound file writes: a write is rejected when the file changed after the agent read it.
@@ -23,7 +24,7 @@ This repository is an early implementation. The runtime contract is strict and t
 - Docker or Podman for isolated runner/tool execution
 - An `OPENROUTER_API_KEY` for the default route, or a configured local/provider adapter
 
-The bootstrap `:free` OpenRouter route permits NVIDIA's documented endpoint data collection. Do not send confidential project content through that route; choose a paid/private provider or a local adapter and set the route's data-collection policy accordingly.
+The checked-in OpenRouter routes permit provider data collection. Do not send confidential project content through those defaults; select a private provider or local adapter and set the route's data-collection policy accordingly.
 
 ## Quick start
 
@@ -76,6 +77,7 @@ pnpm presubmit
 That runs strict typechecking, the production build, all unit/integration tests, contract conformance, and daemon end-to-end tests.
 
 Architecture decisions live in [`docs/adrs`](docs/adrs/README.md), and the runtime integration contract is in [`docs/implementation/runtime-contract.md`](docs/implementation/runtime-contract.md).
+The first completed live evolution run is recorded in [`docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md`](docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md).
 
 ## License
 

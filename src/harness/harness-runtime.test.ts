@@ -45,6 +45,7 @@ import type {
 import { createHarnessActivationService } from "./activation-service.js";
 import { createHarnessRepository } from "./harness-repository.js";
 import { createInitialHarness } from "./initial-harness.js";
+import { createMiniSweBaselineCandidate } from "./mini-swe-baseline.js";
 import { createRunnerHost } from "./runner-host.js";
 
 const roots: string[] = [];
@@ -106,6 +107,74 @@ describe("harness runtime", () => {
     const route = modelRoute();
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.reply", reply: { kind: "model.started", requestId, result: { ok: true, value: { streamId: "stream-bootstrap", route } } } } })}\n`);
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.event", event: { kind: "model.event", event: { kind: "completed", completion: modelCompletion(route) } } } })}\n`);
+    await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.request", request: { kind: "session.complete", outcome: "succeeded" } } });
+    child.kill("SIGTERM");
+  });
+
+  it("materializes a deterministic mini-swe baseline without activating it", async () => {
+    const fixture = await repositoryFixture("mini-baseline");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    expect((await fixture.harnesses.putHarness(initial.value)).ok).toBe(true);
+    expect((await fixture.projects.compareAndSetActiveHarness(fixture.project.id, null, initial.value.id)).ok).toBe(true);
+
+    const first = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    const repeated = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    expect(first.ok && repeated.ok).toBe(true);
+    if (!first.ok || !repeated.ok) return;
+    expect(repeated.value.id).toBe(first.value.id);
+    expect(first.value.parents).toEqual([initial.value.id]);
+    expect(first.value.components.filter((component) => component.kind === "runner")).toHaveLength(1);
+    expect(first.value.components.filter((component) => component.kind === "tool")).toEqual(
+      initial.value.components.filter((component) => component.kind === "tool"),
+    );
+    const runner = first.value.components.find((component) => component.kind === "runner");
+    expect(runner?.entrypoint.startsWith("inline-base64:")).toBe(true);
+    const source = Buffer.from(runner?.entrypoint.slice("inline-base64:".length) ?? "", "base64").toString("utf8");
+    expect(source).toContain('name:"bash"');
+    expect(source).not.toContain('name:"file.read"');
+    const active = await fixture.harnesses.getActiveHarness(fixture.project.id);
+    expect(active.ok && active.value.id).toBe(initial.value.id);
+  });
+
+  it("runs the mini-swe baseline as a bash-only linear agent", async () => {
+    const fixture = await repositoryFixture("mini-loop");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const candidate = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    expect(candidate.ok).toBe(true);
+    if (!candidate.ok) return;
+    const runner = candidate.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.start", start: runnerStart(candidate.value, fixture.workspace) } })}\n`);
+    await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.ready", harnessId: candidate.value.id } });
+    const modelStart = await lines.next();
+    expect(modelStart).toMatchObject({ message: { kind: "runner.request", request: { kind: "model.start", request: { tools: [{ name: "bash" }] } } } });
+    const requestId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    const route = modelRoute();
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.reply", reply: { kind: "model.started", requestId, result: { ok: true, value: { streamId: "stream-bootstrap", route } } } } })}\n`);
+    child.stdin.write(`${JSON.stringify({
+      protocol: "omega-runner-jsonl",
+      version: 1,
+      message: {
+        kind: "kernel.event",
+        event: {
+          kind: "model.event",
+          event: {
+            kind: "completed",
+            completion: {
+              ...modelCompletion(route),
+              content: [{ kind: "tool-call", callId: "submit", toolName: "bash", input: { command: "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" } }],
+            },
+          },
+        },
+      },
+    })}\n`);
     await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.request", request: { kind: "session.complete", outcome: "succeeded" } } });
     child.kill("SIGTERM");
   });

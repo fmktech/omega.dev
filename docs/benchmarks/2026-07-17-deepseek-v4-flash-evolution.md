@@ -1,5 +1,7 @@
 # DeepSeek V4 Flash evolution run — 2026-07-17
 
+[Open the interactive evolution showcase](omega-evolution-showcase.html).
+
 ## Outcome
 
 Omega completed its first end-to-end, project-scoped evolution cycle and automatically promoted the candidate harness.

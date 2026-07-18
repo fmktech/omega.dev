@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.build.json",
     "benchmark:mini-install": "node dist/mini-baseline-main.js",
     "benchmark:crystallize-install": "node dist/crystallization-benchmark-main.js",
+    "benchmark:continual-crystallize": "node dist/continual-crystallization-benchmark-main.js",
     "cli": "node dist/cli-main.js",
     "start": "node dist/main.js",
     "sandbox:image": "sh scripts/build-sandbox-image.sh",

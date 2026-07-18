@@ -1,5 +1,7 @@
 # Five-cycle process crystallization benchmark — 2026-07-18
 
+Methodology note: this experiment tests scorecard-driven lineage selection. It does not model production project learning. The no-selection developer-workstream follow-up is [`2026-07-18-continual-workstream-holdout.md`](./2026-07-18-continual-workstream-holdout.md).
+
 ## Outcome
 
 Five cumulative process-learning cycles produced **two promoted mutations followed by three rejected mutations**. The retained lineage improved from the repaired, unfed mini-style baseline to the cycle-2 harness, then plateaued:

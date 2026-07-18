@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-07-16
 
+The project-learning portion of the AI feedback loop (steps 6–9 below) is superseded by [ADR-0017](0017-developer-workstream-and-final-holdout.md). Paired per-generation evaluation remains a Promotion Eval test, not the production-like continual-learning benchmark.
+
 ## Context
 
 Omega contains deterministic software infrastructure and a stochastic AI agent. Treating both as one test suite would either make ordinary CI slow and flaky or reduce agent evaluation to implementation-shaped unit tests. The central product claim is also unusual: a project-owned harness should learn to make an economical model more effective, especially when the project's environment contradicts the harness's familiar assumptions.

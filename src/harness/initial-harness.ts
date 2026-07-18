@@ -24,6 +24,7 @@ const INITIAL_MODEL_TOOLS = [
   { name: "subagent.observe", description: "Read the current state of a child session.", inputSchema: { type: "object", properties: { sessionId: { type: "string" } }, required: ["sessionId"], additionalProperties: false } },
   { name: "knowledge.catalog", description: "Search short project-knowledge summaries before opening a full document.", inputSchema: { type: "object", properties: { text: { type: "string" }, tags: { type: "array", items: { type: "string" } }, relevantPaths: { type: "array", items: { type: "string" } }, limit: { type: "integer", minimum: 1 } }, required: ["text", "tags", "relevantPaths", "limit"], additionalProperties: false } },
   { name: "knowledge.read", description: "Open one full project-knowledge document by ID.", inputSchema: { type: "object", properties: { documentId: { type: "string" } }, required: ["documentId"], additionalProperties: false } },
+  { name: "skill.read", description: "Open one installed project skill from the session-start skill catalog by component ID.", inputSchema: { type: "object", properties: { componentId: { type: "string" } }, required: ["componentId"], additionalProperties: false } },
   { name: "knowledge.write", description: "Persist a verified project-knowledge document with provenance and compare-and-swap SHA.", inputSchema: { type: "object", properties: { document: { type: "object" }, expectedSha: { type: ["string", "null"] } }, required: ["document", "expectedSha"], additionalProperties: false } },
   { name: "marketplace.search", description: "Search locally created and vetted harness parts.", inputSchema: { type: "object", properties: { text: { type: "string" }, kinds: { type: "array", items: { type: "string" } }, states: { type: "array", items: { type: "string" } }, limit: { type: "integer", minimum: 1 } }, required: ["text", "kinds", "states", "limit"], additionalProperties: false } },
   { name: "marketplace.install", description: "Create a project-scoped candidate from a trusted local marketplace artifact.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"], additionalProperties: false } },
@@ -38,6 +39,11 @@ let messages=[];
 function emit(message){process.stdout.write(JSON.stringify({protocol:"omega-runner-jsonl",version:1,message})+"\n")}
 function request(value,done){const requestId="runner-"+(++requestSequence);pending.set(requestId,done);emit({kind:"runner.request",request:{...value,requestId}})}
 function finish(outcome){request({kind:"session.complete",outcome},()=>{process.exitCode=outcome==="succeeded"?0:1;setImmediate(()=>process.exit())})}
+function bootstrapPrompt(value){
+  const instructions=value.instructions.map(item=>"Instruction file: "+item.path+"\nScope: "+item.scope+"\nSHA-256: "+item.sha+"\n"+item.content).join("\n\n");
+  const catalogs=JSON.stringify({projectKnowledge:value.knowledgeCatalog,installedSkills:value.skillCatalog});
+  return "You are omega.dev's initial SWE runner. Use file SHA interlocks, isolated processes, and authoritative project verification. Preserve unrelated work. Continue until the objective is complete and verified; if a tool reports stale-read, re-read, merge, and retry.\n\nRepository instructions are ordered from root to deeper scopes. Apply every instruction governing a path; a deeper AGENTS.md overrides its parent only where they conflict.\n\n"+(instructions||"No AGENTS.md files were discovered.")+"\n\nCompact durable-context catalogs:\n"+catalogs+"\n\nBefore acting, inspect these catalogs. When an entry may be relevant, call knowledge.read or skill.read to load the full document. Do not infer omitted details from a summary.";
+}
 function modelRequest(){
   const route=start.session.initialModelRoutes.find(route=>route.role==="main-coder")||start.session.initialModelRoutes[0];
   request({kind:"model.start",request:{sessionId:start.session.id,harnessId:currentHarnessId,role:route?.role||"main-coder",messages,tools,maxOutputTokens:Math.min(Number(route?.outputLimit||32768),Number(start.session.capabilityEnvelope.maxOutputTokens)),abortAfterMs:Number(start.session.capabilityEnvelope.wallTimeMs)}},reply=>{
@@ -58,6 +64,7 @@ function toolRequest(call){
     case "subagent.observe":return {kind:"child.observe",sessionId:input.sessionId};
     case "knowledge.catalog":return {kind:"knowledge.catalog",query:{...input,projectId:session.projectId}};
     case "knowledge.read":return {kind:"knowledge.read",documentId:input.documentId};
+    case "skill.read":return {kind:"skill.read",harnessId:currentHarnessId,componentId:input.componentId};
     case "knowledge.write":return {kind:"knowledge.write",request:{...input,projectId:session.projectId}};
     case "marketplace.search":return {kind:"marketplace.search",query:input};
     case "marketplace.install":return {kind:"marketplace.install",artifactId:input.artifactId};
@@ -89,8 +96,12 @@ function accept(envelope){
   if(message?.kind==="kernel.start"){
     if(start!==null)throw new Error("duplicate kernel.start");
     start=message.start;currentHarnessId=start.harness.id;
-    messages=[{role:"system",content:[{kind:"text",text:"You are omega.dev's initial SWE runner. Inspect repository guidance and project files before editing. Use file SHA interlocks, isolated processes, and authoritative project verification. Preserve unrelated work. Continue until the objective is complete and verified; if a tool reports stale-read, re-read, merge, and retry."}]},{role:"user",content:[{kind:"text",text:start.session.objective}]}];
-    emit({kind:"runner.ready",harnessId:currentHarnessId});modelRequest();return;
+    emit({kind:"runner.ready",harnessId:currentHarnessId});
+    request({kind:"context.bootstrap"},reply=>{
+      if(!reply.result?.ok){finish("failed");return}
+      messages=[{role:"system",content:[{kind:"text",text:bootstrapPrompt(reply.result.value)}]},{role:"user",content:[{kind:"text",text:start.session.objective}]}];
+      modelRequest();
+    });return;
   }
   if(message?.kind==="kernel.reply"){
     const done=pending.get(message.reply.requestId);if(done){pending.delete(message.reply.requestId);done(message.reply)}return;
@@ -115,6 +126,7 @@ const INITIAL_TOOLS: readonly { readonly name: string; readonly capabilities: re
   { name: "subagent.observe", capabilities: [] },
   { name: "knowledge.catalog", capabilities: [] },
   { name: "knowledge.read", capabilities: [] },
+  { name: "skill.read", capabilities: [] },
   { name: "knowledge.write", capabilities: ["write-knowledge"] },
   { name: "marketplace.search", capabilities: [] },
   { name: "marketplace.install", capabilities: ["install-marketplace"] },

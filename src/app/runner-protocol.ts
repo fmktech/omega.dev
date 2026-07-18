@@ -87,6 +87,23 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
     let afterReply: (() => Promise<void>) | null = null;
 
     switch (request.kind) {
+      case "context.bootstrap": {
+        const workspace = await context.projects.getWorkspace(session.value.header.workspaceId);
+        const harness = await context.harnesses.getHarness(session.value.header.initialHarnessId);
+        const result = !workspace.ok ? workspace : !harness.ok ? harness : await context.context.bootstrap(workspace.value, harness.value);
+        reply = { kind: "context.bootstrapped", requestId: request.requestId, result };
+        break;
+      }
+      case "skill.read": {
+        const harness = await context.harnesses.getHarness(request.harnessId);
+        const result = !harness.ok
+          ? harness
+          : harness.value.projectId !== projectId
+            ? denied("read-files", "The skill harness does not belong to this runner project")
+            : await context.context.readSkill(request.harnessId, request.componentId);
+        reply = { kind: "skill.read", requestId: request.requestId, result };
+        break;
+      }
       case "model.start": {
         const result = request.request.sessionId === sessionId
           ? await context.models.stream(request.request, capabilities)

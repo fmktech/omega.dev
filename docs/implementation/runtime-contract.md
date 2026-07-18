@@ -23,6 +23,8 @@ Every stdin/stdout line is one UTF-8 JSON object terminated by `\n` and matching
 
 The host rejects an invalid envelope before dispatch. It caps one line at 1 MiB, tolerates a final partial line only by recording `ProtocolError`, and never guesses a newer version. A runner first receives `kernel.start` and must answer `runner.ready` with the same harness ID. Every `runner.request` receives exactly one matching reply, except an escalated request whose reply is deferred as documented in the contract. A stale harness call receives `request.rejected` with `HarnessVersionMismatchError`.
 
+The initial runner's first request after `runner.ready` is `context.bootstrap`; it does not start a model call until `context.bootstrapped` succeeds. The reply contains scoped `AGENTS.md` documents ordered by repository scope plus compact project-knowledge and installed-skill catalogs. `skill.read` names both the current harness and component, and the daemon returns content only when that component is an installed skill owned by the same project.
+
 ## Exact construction exports
 
 Feature modules export these named factories and annotate them with the corresponding contract-owned `Create*`, `RunCli`, `RenderHtmlApp`, or `StartHttpServer` function type. Local aliases are not substitutes. Factories perform no background work until explicitly noted.
@@ -35,12 +37,13 @@ Feature modules export these named factories and annotate them with the correspo
 | process-runtime | `createProcessRuntime: CreateProcessRuntime` |
 | harness-runtime | `createHarnessRepository: CreateHarnessRepository`; `createRunnerHost: CreateRunnerHost`; `createHarnessActivationService: CreateHarnessActivationService`; `createInitialHarness: CreateInitialHarness` |
 | sessions | `createSessionService: CreateSessionService` |
+| context-bootstrap | `createContextService: CreateContextService` |
 | knowledge-marketplace | `createKnowledgeService: CreateKnowledgeService`; `createMarketplaceService: CreateMarketplaceService` |
 | evolution-benchmarks | `createBenchmarkService: CreateBenchmarkService`; `createEvolutionService: CreateEvolutionService`; `createOmegaBenchManifest: CreateOmegaBenchManifest` |
 | clients | `createOmegaClient: CreateOmegaClient`; `runCli: RunCli`; `renderHtmlApp: RenderHtmlApp` |
 | daemon-integrator | `createOmegaApplication: CreateOmegaApplication`; `startHttpServer: StartHttpServer`; a `BenchmarkRunLauncher` implementation that materializes fixtures and keeps private verifier metadata outside runner messages |
 
-The integrator resolves the home directory and constructs modules in this order: persistence, model routing, policy, process runtime, harness runtime, sessions, knowledge/marketplace, benchmark launcher, benchmark service, evolution service, application, HTTP server. A newly registered project has `activeHarnessId: null`; the integrator immediately calls `createInitialHarness`, which stores the manifest and CAS-initializes the pointer before returning registration success to a client. Shutdown reverses ownership: stop accepting HTTP, notify runners, cancel/terminate supervised processes by deadline, flush session/object state, then close the listener.
+The integrator resolves the home directory and constructs modules in this order: persistence, model routing, policy, process runtime, harness runtime, knowledge, context bootstrap, sessions, marketplace, benchmark launcher, benchmark service, evolution service, application, HTTP server. A newly registered project has `activeHarnessId: null`; the integrator immediately calls `createInitialHarness`, which stores the manifest and CAS-initializes the pointer before returning registration success to a client. Shutdown reverses ownership: stop accepting HTTP, notify runners, cancel/terminate supervised processes by deadline, flush session/object state, then close the listener.
 
 ## Deterministic policy precedence
 

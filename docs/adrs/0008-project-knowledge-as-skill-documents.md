@@ -19,6 +19,8 @@ Durable project knowledge is stored as readable Markdown documents with validate
 
 At session start, the runner receives only a compact catalog of titles, summaries, tags, confidence, and relevant paths. It reads a complete document selectively when the task requires it.
 
+The same pre-model bootstrap deterministically discovers repository `AGENTS.md` files outside ignored VCS, dependency, and build trees. Each file carries its repository scope and SHA; root instructions apply first and deeper scoped instructions take precedence on conflicts. Installed skill components expose compact `name`, `description`, `tags`, and `relevantPaths` metadata, while `skill.read` returns the full immutable document only after harness ownership is verified.
+
 The same discovery shape may catalog project knowledge, installed skills, connectors, tools, and marketplace precedents, while retaining distinct artifact types and permissions.
 
 Knowledge files remain ordinary readable Markdown, but writes go through the daemon API so Omega can validate frontmatter, attach provenance, version the document, and reject concurrent modification.
@@ -43,4 +45,3 @@ Original session evidence remains authoritative if a knowledge document becomes 
 - **Opaque vector-store-only memory:** rejected because durable knowledge must remain readable and attributable.
 - **Only post-task memory writes:** rejected because the main agent may discover an immediately valuable durable fact.
 - **Only direct writes:** rejected because automatic crystallization is central to compounding hard-won knowledge.
-

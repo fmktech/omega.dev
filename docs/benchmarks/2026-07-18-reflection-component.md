@@ -68,14 +68,11 @@ The guided release scenario exposed the same lossy-abstraction problem more shar
 
 The preview-process case exceeded its one-lesson bound by splitting a single lifecycle into both a skill and runner rule. Even good lessons need consolidation so that repeated reflection does not grow an unbounded harness.
 
-## Runtime retrieval gap
+## Runtime retrieval follow-up
 
-The storage and protocol foundations for durable learning exist, but retrieval is not complete:
+The retrieval gap exposed by this benchmark was implemented immediately afterward. Before its first model call, the initial runner now receives deterministically discovered scoped `AGENTS.md` documents and compact catalogs for project knowledge and installed skills. Full knowledge and skill documents remain selectively loaded through `knowledge.read` and `skill.read`.
 
-- `AGENTS.md` is readable and the runner is told to inspect repository guidance, but Omega does not yet deterministically discover the applicable root-to-subdirectory instruction chain or resolve its precedence before work.
-- Validated skill-like Markdown knowledge, catalog/read/write APIs, `skill` components, and local marketplace installation exist. The initial runner does not yet receive the compact catalog at session start or automatically select relevant installed `SKILL.md` documents.
-
-This is the highest-priority runtime gap revealed by the benchmark. Correct reflection cannot compound if a later session fails to discover the resulting project knowledge or skill.
+Retrieval relevance is still model-selected in this first slice. A later benchmark should measure catalog recall and whether the runner opens the right document before acting; semantic ranking and automatic path-derived prefetch remain evolvable context-compiler work.
 
 ## Interpretation
 

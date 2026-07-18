@@ -69,7 +69,7 @@ describe("harness runtime", () => {
     expect(created.value.components.filter((component) => component.kind === "runner")).toHaveLength(1);
     expect(created.value.components.filter((component) => component.kind === "tool").map((component) => component.entrypoint)).toEqual([
       "file.read", "file.write", "process.start", "process.observe", "process.input", "process.cancel", "subagent.spawn",
-      "subagent.observe", "knowledge.catalog", "knowledge.read", "knowledge.write", "marketplace.search", "marketplace.install",
+      "subagent.observe", "knowledge.catalog", "knowledge.read", "skill.read", "knowledge.write", "marketplace.search", "marketplace.install",
       "harness.evolve", "harness.status",
     ]);
     const beforeActivation = await fixture.projects.getProject(fixture.project.id);
@@ -104,8 +104,26 @@ describe("harness runtime", () => {
     const lines = lineReader(child.stdout);
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) } })}\n`);
     await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.ready", harnessId: created.value.id } });
+    const bootstrap = await lines.next();
+    expect(bootstrap).toMatchObject({ message: { kind: "runner.request", request: { kind: "context.bootstrap" } } });
+    const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.reply", reply: {
+      kind: "context.bootstrapped",
+      requestId: bootstrapId,
+      result: { ok: true, value: {
+        instructions: [{ path: "AGENTS.md", scope: ".", content: "Use just verify.\n", sha: "a".repeat(64) }],
+        knowledgeCatalog: [{ id: "project-environment", title: "Local environment", summary: "Use rootless Podman", tags: ["environment"], confidence: 1, verifiedAt: NOW, relevantPaths: ["."] }],
+        skillCatalog: [{ componentId: "component_verify", name: "verify-project", description: "Run the project verifier", tags: ["verify"], relevantPaths: ["src"] }],
+      } },
+    } } })}\n`);
     const modelStart = await lines.next();
-    expect(modelStart).toMatchObject({ message: { kind: "runner.request", request: { kind: "model.start" } } });
+    expect(modelStart).toMatchObject({ message: { kind: "runner.request", request: { kind: "model.start", request: { tools: expect.arrayContaining([expect.objectContaining({ name: "skill.read" })]) } } } });
+    const modelRequest = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+    const systemText = (((modelRequest["messages"] as readonly JsonObject[])[0]?.["content"] as readonly JsonObject[])[0]?.["text"] as string);
+    expect(systemText).toContain("Instruction file: AGENTS.md");
+    expect(systemText).toContain("Use just verify.");
+    expect(systemText).toContain("Local environment");
+    expect(systemText).toContain("verify-project");
     const requestId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
     const route = modelRoute();
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.reply", reply: { kind: "model.started", requestId, result: { ok: true, value: { streamId: "stream-bootstrap", route } } } } })}\n`);

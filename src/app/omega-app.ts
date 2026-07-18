@@ -42,6 +42,7 @@ import type {
 } from "../contracts/index.js";
 import { createBenchmarkService } from "../evolution/benchmark-service.js";
 import { createEvolutionService } from "../evolution/evolution-service.js";
+import { createContextService } from "../context/context-service.js";
 import { createHarnessActivationService } from "../harness/activation-service.js";
 import { createHarnessRepository } from "../harness/harness-repository.js";
 import { createInitialHarness } from "../harness/initial-harness.js";
@@ -538,6 +539,8 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
   const harnesses = createHarnessRepository(root, objects, projects);
   const runners = createRunnerHost(runtime.processes, harnesses);
   const baseActivation = createHarnessActivationService(projects, harnesses);
+  const knowledge = createKnowledgeService(root, objects);
+  const contextService = createContextService({ objects, knowledge, harnesses });
   let context: OmegaContext;
   const runnerRequests = createRunnerProtocolDispatcher(() => context);
   const sessions = createSessionService({
@@ -558,7 +561,6 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     sessions,
     runners,
   });
-  const knowledge = createKnowledgeService(root, objects);
   const marketplace = createMarketplaceService({ root, objects, harnesses, activation });
   const launcher = createBenchmarkRunLauncher({ root, objects, projects, sessions, repository: sessionRepository, config });
   const benchmarks = createBenchmarkService({ root, objects, sessions, harnesses, activation, launcher });
@@ -586,6 +588,7 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     runnerRequests,
     activation,
     knowledge,
+    context: contextService,
     marketplace,
     evolution,
     benchmarks,

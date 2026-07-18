@@ -289,6 +289,7 @@ export type HarnessError =
   | CapabilityDeniedError
   | ProtocolError;
 export type KnowledgeError = StoreError | StaleReadError | CapabilityDeniedError;
+export type ContextError = HarnessError | KnowledgeError;
 export type EvolutionError = HarnessError | SessionError | ModelError | BudgetExceededError;
 export type ApiError =
   | UnauthorizedError
@@ -851,6 +852,36 @@ export type HarnessUpdate = {
   readonly activatedAt: Timestamp;
 };
 
+export type ProjectInstruction = {
+  readonly path: RelativePath;
+  /** Repository directory governed by this file; deeper scopes take precedence. */
+  readonly scope: RelativePath;
+  readonly content: string;
+  readonly sha: Sha256;
+};
+
+export type SkillCatalogEntry = {
+  readonly componentId: ComponentId;
+  readonly name: string;
+  readonly description: string;
+  readonly tags: readonly string[];
+  readonly relevantPaths: readonly RelativePath[];
+};
+
+export type SkillDocument = {
+  readonly componentId: ComponentId;
+  readonly objectHash: ObjectHash;
+  readonly catalog: SkillCatalogEntry;
+  readonly markdown: string;
+};
+
+export type RunnerBootstrapContext = {
+  /** Ordered from repository root to the deepest lexical scope. */
+  readonly instructions: readonly ProjectInstruction[];
+  readonly knowledgeCatalog: readonly KnowledgeCatalogEntry[];
+  readonly skillCatalog: readonly SkillCatalogEntry[];
+};
+
 export type RunnerStart = {
   readonly session: SessionHeader;
   readonly workspace: WorkspaceRecord;
@@ -859,6 +890,8 @@ export type RunnerStart = {
 };
 
 export type RunnerRequest =
+  | { readonly kind: "context.bootstrap"; readonly requestId: RequestId }
+  | { readonly kind: "skill.read"; readonly requestId: RequestId; readonly harnessId: HarnessId; readonly componentId: ComponentId }
   | { readonly kind: "model.start"; readonly requestId: RequestId; readonly request: ModelRequest }
   | { readonly kind: "process.start"; readonly requestId: RequestId; readonly spec: ProcessSpec }
   | { readonly kind: "process.observe"; readonly requestId: RequestId; readonly processId: ProcessId; readonly after: readonly { readonly stream: ProcessStream; readonly offset: ByteCount }[] }
@@ -882,6 +915,8 @@ export type RunnerRequest =
 
 export type RunnerReply =
   | { readonly kind: "request.rejected"; readonly requestId: RequestId; readonly error: HarnessVersionMismatchError }
+  | { readonly kind: "context.bootstrapped"; readonly requestId: RequestId; readonly result: Result<RunnerBootstrapContext, ContextError> }
+  | { readonly kind: "skill.read"; readonly requestId: RequestId; readonly result: Result<SkillDocument, ContextError> }
   | { readonly kind: "model.started"; readonly requestId: RequestId; readonly result: Result<{ readonly streamId: ModelStreamId; readonly route: ModelRouteSignature }, ModelError> }
   | { readonly kind: "process.started"; readonly requestId: RequestId; readonly result: Result<ProcessHandle, ProcessError> }
   | { readonly kind: "process.observed"; readonly requestId: RequestId; readonly result: Result<ProcessObservation, ProcessError> }
@@ -1594,6 +1629,11 @@ export interface KnowledgeService {
   write(request: KnowledgeWriteRequest, capabilities: CapabilityEnvelope): Promise<Result<KnowledgeDocument, KnowledgeError>>;
 }
 
+export interface ContextService {
+  bootstrap(workspace: WorkspaceRecord, harness: HarnessManifest): Promise<Result<RunnerBootstrapContext, ContextError>>;
+  readSkill(harnessId: HarnessId, componentId: ComponentId): Promise<Result<SkillDocument, ContextError>>;
+}
+
 export interface MarketplaceService {
   search(query: MarketplaceQuery): Promise<Result<readonly MarketplaceArtifact[], KnowledgeError>>;
   publish(artifact: MarketplaceArtifact): Promise<Result<MarketplaceArtifact, KnowledgeError>>;
@@ -1667,6 +1707,11 @@ export type CreateSessionService = (options: {
 }) => SessionService;
 export type CreateRunnerProtocolDispatcher = (context: () => OmegaContext) => RunnerProtocolDispatcher;
 export type CreateKnowledgeService = (root: AbsolutePath, objects: ObjectStore) => KnowledgeService;
+export type CreateContextService = (options: {
+  readonly objects: ObjectStore;
+  readonly knowledge: KnowledgeService;
+  readonly harnesses: HarnessRepository;
+}) => ContextService;
 export type CreateMarketplaceService = (options: {
   readonly root: AbsolutePath;
   readonly objects: ObjectStore;
@@ -1716,6 +1761,7 @@ export interface OmegaContext {
   readonly runnerRequests: RunnerProtocolDispatcher;
   readonly activation: HarnessActivationService;
   readonly knowledge: KnowledgeService;
+  readonly context: ContextService;
   readonly marketplace: MarketplaceService;
   readonly evolution: EvolutionService;
   readonly benchmarks: BenchmarkService;

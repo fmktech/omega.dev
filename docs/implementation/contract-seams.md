@@ -10,6 +10,7 @@ This inventory precedes the frozen TypeScript contract. Every feature module may
 | execution-policy | process-runtime, harness-runtime, daemon-integrator | Observed action facts and allow/deny/escalate decisions constrained by immutable capabilities |
 | sessions | harness-runtime, clients, daemon-integrator, evolution-benchmarks | Session/thread lifecycle, child sessions, handoffs, recovery, live semantic events |
 | harness-runtime | sessions, evolution-benchmarks, clients, daemon-integrator | Harness manifests, runner protocol, activation pointer, safe-boundary version updates and rollback |
+| context-bootstrap | harness-runtime, daemon-integrator | Scoped `AGENTS.md` documents, compact knowledge/installed-skill catalogs, and harness-owned full skill reads |
 | knowledge-marketplace | harness-runtime, evolution-benchmarks, clients | Knowledge catalog/documents and marketplace search/install/publication artifacts |
 | evolution-benchmarks | harness-runtime, sessions, clients | Evolution jobs, benchmark manifests/runs, paired scorecards, promotion decisions and canary outcomes |
 | clients | daemon-integrator | Local API commands, query results, SSE event envelopes, authentication failures |

@@ -30,7 +30,7 @@ const MAX_LINE_BYTES = 1024 * 1024;
 const READY_POLLS = 100;
 const READY_POLL_DELAY_MS = 10;
 const REQUEST_KINDS: ReadonlySet<string> = new Set([
-  "model.start", "process.start", "process.observe", "process.input", "process.cancel", "artifact.read", "file.read",
+  "context.bootstrap", "skill.read", "model.start", "process.start", "process.observe", "process.input", "process.cancel", "artifact.read", "file.read",
   "file.write", "child.spawn", "child.observe", "knowledge.catalog", "knowledge.read", "knowledge.write",
   "marketplace.search", "marketplace.install", "harness.evolve", "harness.status", "evolution.observe",
   "evolution.cancel", "session.complete",
@@ -444,6 +444,10 @@ const MARKETPLACE_STATES = new Set(["experimental", "proven", "deprecated"]);
 function isRunnerRequest(value: JsonValue | undefined): value is RunnerRequest {
   if (!isObject(value) || typeof value["kind"] !== "string" || !REQUEST_KINDS.has(value["kind"]) || !isId(value["requestId"])) return false;
   switch (value["kind"]) {
+    case "context.bootstrap":
+      return true;
+    case "skill.read":
+      return isId(value["harnessId"]) && isId(value["componentId"]);
     case "model.start":
       return isModelRequest(value["request"]);
     case "process.start":

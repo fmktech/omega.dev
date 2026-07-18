@@ -14,11 +14,13 @@ The initial harness exposes only these conceptual tools:
 - `file.read` and SHA-guarded `file.write`;
 - `process.start`, `process.observe`, `process.input`, and `process.cancel`;
 - `subagent.spawn` and `subagent.observe`;
-- `knowledge.catalog`, `knowledge.read`, and `knowledge.write`;
+- automatic `context.bootstrap`, then `knowledge.catalog`, `knowledge.read`, `skill.read`, and `knowledge.write`;
 - `marketplace.search` and `marketplace.install`;
 - `harness.evolve` and `harness.status`.
 
 The main agent may call `harness.evolve` at any point, subject to the incumbent execution-policy decision. Automatic post-task crystallization is also enabled for eligible expensive successes.
+
+`context.bootstrap` is an internal runner handshake rather than a model-facing tool. It must complete after `runner.ready` and before the first model request so repository instructions and compact catalogs cannot depend on model initiative.
 
 Shell commands, Git, tests, search utilities, Python, Node, and Bash are accessed through the process interface. Jira and similar connectors are marketplace components rather than kernel features.
 
@@ -36,4 +38,3 @@ Specialized patching, Git, testing, code-search, browser, and domain tools shoul
 - **Replicate a broad existing coding-agent tool suite:** rejected because Omega should learn which tools its projects need.
 - **Bash as the only tool:** rejected because process lifecycle, structured knowledge, marketplace, evolution, and the SHA file interlock need explicit contracts.
 - **Jira in the kernel:** rejected because connectors are installable, project-dependent components.
-

@@ -5,6 +5,7 @@ import type {
   ArtifactId,
   AbsolutePath,
   ByteCount,
+  ComponentId,
   DurationMs,
   EventId,
   HarnessId,
@@ -39,6 +40,47 @@ const HARNESS_ID = "harness-protocol" as HarnessId;
 const NOW = "2026-07-16T12:00:00.000Z" as Timestamp;
 
 describe("runner protocol dispatcher", () => {
+  it("bootstraps durable context and reads only skills installed in the requested project harness", async () => {
+    const skillId = "component-context-skill" as ComponentId;
+    const requests: RunnerToKernelEnvelope[] = [
+      runnerRequest({ kind: "context.bootstrap", requestId: "request-context" as RequestId }),
+      runnerRequest({ kind: "skill.read", requestId: "request-skill" as RequestId, harnessId: HARNESS_ID, componentId: skillId }),
+    ];
+    const sent: KernelToRunnerEnvelope[] = [];
+    const calls: string[] = [];
+    const record = sessionRecord();
+    const workspace = { id: record.header.workspaceId, projectId: record.header.projectId, path: "/workspace", registeredAt: NOW, lastSeenAt: NOW };
+    const harness = { id: HARNESS_ID, projectId: record.header.projectId, alias: "active", parents: [], components: [], sourceArtifacts: [], createdAt: NOW };
+    const context = {
+      runners: staticRunner(requests, sent),
+      sessionRepository: { async get() { return { ok: true, value: record }; } },
+      projects: { async getWorkspace() { return { ok: true, value: workspace }; } },
+      harnesses: { async getHarness() { return { ok: true, value: harness }; } },
+      context: {
+        async bootstrap() {
+          calls.push("bootstrap");
+          return { ok: true, value: { instructions: [], knowledgeCatalog: [], skillCatalog: [] } };
+        },
+        async readSkill() {
+          calls.push("skill.read");
+          return { ok: true, value: {
+            componentId: skillId,
+            objectHash: "a".repeat(64),
+            catalog: { componentId: skillId, name: "verify", description: "Verify project", tags: [], relevantPaths: [] },
+            markdown: "# Verify\n",
+          } };
+        },
+      },
+      sessions: { async recordRunnerEvent(_sessionId: SessionId, payload: PersistedEventPayload) { return { ok: true, value: event(payload) }; } },
+    } as unknown as OmegaContext;
+
+    createRunnerProtocolDispatcher(() => context).start(SESSION_ID);
+    await waitFor(() => sent.filter(isReplyEnvelope).length === 2);
+
+    expect(sent.filter(isReplyEnvelope).map((envelope) => envelope.message.reply.kind)).toEqual(["context.bootstrapped", "skill.read"]);
+    expect(calls).toEqual(["bootstrap", "skill.read"]);
+  });
+
   it("gives every runner request one reply and persists aggregate model semantics while streaming deltas", async () => {
     const route = modelRoute();
     const completion = modelCompletion(route);

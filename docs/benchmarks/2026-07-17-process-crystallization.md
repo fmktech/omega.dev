@@ -1,5 +1,7 @@
 # Process crystallization benchmark — 2026-07-17
 
+Follow-up: [`2026-07-18-five-cycle-crystallization.md`](./2026-07-18-five-cycle-crystallization.md) extends this experiment through five cumulative mutation-and-evaluation cycles.
+
 ## Outcome
 
 An experience-fed mini-style project harness passed **6/10** sealed tasks, compared with **5/10** for its unfed parent.

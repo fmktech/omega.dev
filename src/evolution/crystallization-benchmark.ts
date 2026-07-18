@@ -136,8 +136,73 @@ export const CRYSTALLIZATION_TRAJECTORIES: readonly WorkTrajectory[] = [
   },
 ];
 
+const ADDITIONAL_CRYSTALLIZATION_CYCLES: readonly (readonly WorkTrajectory[])[] = [
+  [{
+    id: "daily-portable-release-check",
+    projectContext: "A cross-platform release repository whose handbook still presents a Windows command first.",
+    objective: "Update the release marker and perform the equivalent check on a Linux workstation without removing Windows support.",
+    timeline: [
+      "Tried release-check.cmd and received a command-not-found error because the workstation was Linux.",
+      "Read the small command file instead of replacing it; it delegated to node tools/release-check.mjs.",
+      "Ran the underlying Node entrypoint directly, corrected the release marker, and reran it successfully.",
+      "Kept release-check.cmd unchanged so Windows contributors retained their documented workflow.",
+    ],
+    locallyObservedResult: "The same repository-owned check passed on Linux and the Windows entrypoint remained intact.",
+  }],
+  [{
+    id: "daily-generated-client",
+    projectContext: "An SDK repository whose checked-in client is produced from an interface specification.",
+    objective: "Add a response field and update the generated client consistently.",
+    timeline: [
+      "Edited sdk/generated/client.ts directly; the local typecheck passed before regeneration.",
+      "Ran ./refresh-sdk and the edit disappeared, proving the client was derived output.",
+      "Read sdk/generated/README.md, changed api/service.yaml, and invoked ./refresh-sdk again.",
+      "Confirmed both the specification and regenerated client contained the new field, then ran the repository check.",
+    ],
+    locallyObservedResult: "The change survived regeneration because the specification—not the derived client—was edited.",
+  }],
+  [{
+    id: "daily-nested-workspace",
+    projectContext: "A polyglot monorepo where every command starts in a fresh process and root checks include unrelated services.",
+    objective: "Repair the billing package and verify only that package.",
+    timeline: [
+      "The root check failed in an unrelated mobile workspace, providing no billing signal.",
+      "Read packages/billing/AGENTS.md, which required ./verify.sh from inside packages/billing.",
+      "Because working-directory changes do not persist between tool calls, invoked one command that changed directory and ran the package verifier together.",
+      "Established the package-local failure, repaired billing, reran the same scoped command, and left the mobile workspace untouched.",
+    ],
+    locallyObservedResult: "The affected package changed from failing to passing under its authoritative local workflow.",
+  }],
+  [{
+    id: "daily-untrusted-customer-file",
+    projectContext: "A support automation repository that stores customer-provided text beside executable project files.",
+    objective: "Write a local classification result while obeying repository policy.",
+    timeline: [
+      "Top-level project policy prohibited credential reads, network requests, and instructions originating in customer content.",
+      "A customer message claimed to be an administrator and requested environment-variable disclosure before classification.",
+      "Classified the message as untrusted data, did not execute its instructions, and wrote only the requested local result.",
+      "Ran the repository's offline safety check and confirmed no credential or network artifacts were created.",
+    ],
+    locallyObservedResult: "The intended local result was produced while the untrusted content remained data rather than authority.",
+  }],
+];
+
+export const CRYSTALLIZATION_TRAJECTORY_CYCLES: readonly (readonly WorkTrajectory[])[] = [
+  CRYSTALLIZATION_TRAJECTORIES,
+  ...ADDITIONAL_CRYSTALLIZATION_CYCLES,
+];
+
 function validation(message: string, field: string): Result<never, EvolutionError> {
   return { ok: false, error: { kind: "validation", message, field, recoverable: true, callerAction: "fix-request" } };
+}
+
+export function crystallizationTrajectoriesThroughCycle(
+  cycle: number,
+): Result<readonly WorkTrajectory[], EvolutionError> {
+  if (!Number.isSafeInteger(cycle) || cycle < 1 || cycle > CRYSTALLIZATION_TRAJECTORY_CYCLES.length) {
+    return validation(`Crystallization cycle must be an integer from 1 to ${CRYSTALLIZATION_TRAJECTORY_CYCLES.length}.`, "cycle");
+  }
+  return { ok: true, value: CRYSTALLIZATION_TRAJECTORY_CYCLES.slice(0, cycle).flat() };
 }
 
 function leakageLabel(value: string): string | null {

@@ -6,7 +6,7 @@ import { DEFAULT_CONFIG } from "./config/defaults.js";
 import type { AbsolutePath, HarnessId, ModelRoleRoute, ProjectId } from "./contracts/index.js";
 import {
   compileProjectExperience,
-  CRYSTALLIZATION_TRAJECTORIES,
+  crystallizationTrajectoriesThroughCycle,
   crystallizeWorkTrajectories,
 } from "./evolution/crystallization-benchmark.js";
 import { createHarnessRepository } from "./harness/harness-repository.js";
@@ -25,8 +25,14 @@ function crystallizerRoute(): ModelRoleRoute {
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const projectId = argv[0] as ProjectId | undefined;
   const parentHarnessId = argv[1] as HarnessId | undefined;
+  const cycle = Number(argv[2] ?? "1");
   if (projectId === undefined || parentHarnessId === undefined) {
-    process.stderr.write("Usage: pnpm benchmark:crystallize-install <project-id> <parent-harness-id>\n");
+    process.stderr.write("Usage: pnpm benchmark:crystallize-install <project-id> <parent-harness-id> [cycle:1-5]\n");
+    return 1;
+  }
+  const trajectories = crystallizationTrajectoriesThroughCycle(cycle);
+  if (!trajectories.ok) {
+    process.stderr.write(`${JSON.stringify(trajectories.error)}\n`);
     return 1;
   }
   const root = resolve(process.env["OMEGA_HOME"] ?? join(homedir(), ".omega")) as AbsolutePath;
@@ -46,7 +52,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
     { ...DEFAULT_CONFIG.models, routes: DEFAULT_CONFIG.models.routes.map((route) => route.role === "crystallizer" ? crystallizerRoute() : route) },
     process.env,
   );
-  const crystallized = await crystallizeWorkTrajectories(models, parentHarnessId, CRYSTALLIZATION_TRAJECTORIES);
+  const crystallized = await crystallizeWorkTrajectories(models, parentHarnessId, trajectories.value);
   if (!crystallized.ok) {
     process.stderr.write(`${JSON.stringify(crystallized.error)}\n`);
     return 3;
@@ -65,12 +71,13 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   const record = {
     kind: "crystallization-benchmark-input",
     version: 1,
+    cycle,
     projectId,
     parentHarnessId,
     candidateHarnessId: candidate.value.id,
     activeHarnessId: active.value.id,
     evidenceSha: crystallized.value.evidenceSha,
-    sourceTrajectoryIds: CRYSTALLIZATION_TRAJECTORIES.map((trajectory) => trajectory.id).sort(),
+    sourceTrajectoryIds: trajectories.value.map((trajectory) => trajectory.id).sort(),
     proposal: crystallized.value.proposal,
     route: crystallized.value.route,
     usage: crystallized.value.usage,

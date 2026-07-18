@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { HarnessId, ModelRouter } from "../contracts/index.js";
 import {
   compileProjectExperience,
+  crystallizationTrajectoriesThroughCycle,
   crystallizeWorkTrajectories,
   parseCrystallizationProposal,
   renderCrystallizationPrompt,
@@ -35,6 +36,21 @@ function proposal(value: Partial<CrystallizationProposal> = {}): Crystallization
 }
 
 describe("crystallization benchmark", () => {
+  it("adds work evidence cumulatively across exactly five cycles", () => {
+    const first = crystallizationTrajectoriesThroughCycle(1);
+    const fifth = crystallizationTrajectoriesThroughCycle(5);
+
+    expect(first.ok && fifth.ok).toBe(true);
+    if (!first.ok || !fifth.ok) return;
+    expect(first.value).toHaveLength(6);
+    expect(fifth.value).toHaveLength(10);
+    expect(fifth.value.slice(0, first.value.length)).toEqual(first.value);
+    expect(new Set(fifth.value.map((item) => item.id)).size).toBe(fifth.value.length);
+    expect(crystallizationTrajectoriesThroughCycle(0).ok).toBe(false);
+    expect(crystallizationTrajectoriesThroughCycle(6).ok).toBe(false);
+    expect(crystallizationTrajectoriesThroughCycle(1.5).ok).toBe(false);
+  });
+
   it("canonicalizes duplicate process evidence while preserving UTF-8 content", () => {
     const second = trajectory({ id: "daily-zebra-check", objective: "Run zèbre." });
     const result = renderCrystallizationPrompt([second, trajectory(), trajectory()]);

@@ -45,7 +45,10 @@ import type {
 import { createHarnessActivationService } from "./activation-service.js";
 import { createHarnessRepository } from "./harness-repository.js";
 import { createInitialHarness } from "./initial-harness.js";
-import { createMiniSweBaselineCandidate } from "./mini-swe-baseline.js";
+import {
+  createExperienceFedMiniSweCandidate,
+  createMiniSweBaselineCandidate,
+} from "./mini-swe-baseline.js";
 import { createRunnerHost } from "./runner-host.js";
 
 const roots: string[] = [];
@@ -177,6 +180,104 @@ describe("harness runtime", () => {
     })}\n`);
     await expect(lines.next()).resolves.toMatchObject({ message: { kind: "runner.request", request: { kind: "session.complete", outcome: "succeeded" } } });
     child.kill("SIGTERM");
+  });
+
+  it("returns one result for every bash call before requesting another model turn", async () => {
+    const fixture = await repositoryFixture("mini-multi-call");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const candidate = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    expect(candidate.ok).toBe(true);
+    if (!candidate.ok) return;
+    const runner = candidate.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    send({ kind: "kernel.start", start: runnerStart(candidate.value, fixture.workspace) });
+    await lines.next();
+    const initialModel = await lines.next();
+    const initialModelId = ((initialModel["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    const route = modelRoute();
+    send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: initialModelId, result: { ok: true, value: { streamId: "stream-multi", route } } } });
+    send({
+      kind: "kernel.event",
+      event: {
+        kind: "model.event",
+        event: {
+          kind: "completed",
+          completion: {
+            ...modelCompletion(route),
+            streamId: "stream-multi",
+            content: [
+              { kind: "tool-call", callId: "call-one", toolName: "bash", input: { command: "printf one" } },
+              { kind: "tool-call", callId: "call-two", toolName: "bash", input: { command: "printf two" } },
+            ],
+          },
+        },
+      },
+    });
+
+    const firstStart = await lines.next();
+    expect(firstStart).toMatchObject({ message: { request: { kind: "process.start", spec: { args: expect.arrayContaining(["printf one"]) } } } });
+    const firstStartId = ((firstStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "process.started", requestId: firstStartId, result: { ok: true, value: { id: "process-one" } } } });
+    const firstObserve = await lines.next();
+    const firstObserveId = ((firstObserve["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "process.observed", requestId: firstObserveId, result: { ok: true, value: { state: "exited", slices: [{ stream: "stdout", range: { startInclusive: 0, endExclusive: 24 }, data: "one\n__OMEGA_MINI_RC__=0\n" }] } } } });
+
+    const secondStart = await lines.next();
+    expect(secondStart).toMatchObject({ message: { request: { kind: "process.start", spec: { args: expect.arrayContaining(["printf two"]) } } } });
+    const secondStartId = ((secondStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "process.started", requestId: secondStartId, result: { ok: true, value: { id: "process-two" } } } });
+    const secondObserve = await lines.next();
+    const secondObserveId = ((secondObserve["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "process.observed", requestId: secondObserveId, result: { ok: true, value: { state: "exited", slices: [{ stream: "stdout", range: { startInclusive: 0, endExclusive: 24 }, data: "two\n__OMEGA_MINI_RC__=0\n" }] } } } });
+
+    const nextModel = await lines.next();
+    const nextRequest = ((nextModel["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+    const messages = nextRequest["messages"] as readonly JsonObject[];
+    expect(nextModel).toMatchObject({ message: { request: { kind: "model.start" } } });
+    expect(messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: [
+        { kind: "tool-result", callId: "call-one", result: expect.objectContaining({ returncode: 0 }) },
+        { kind: "tool-result", callId: "call-two", result: expect.objectContaining({ returncode: 0 }) },
+      ],
+    });
+    child.kill("SIGTERM");
+  });
+
+  it("materializes identical project experience once without activating it", async () => {
+    const fixture = await repositoryFixture("crystallized-mini");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    expect((await fixture.harnesses.putHarness(initial.value)).ok).toBe(true);
+    expect((await fixture.projects.compareAndSetActiveHarness(fixture.project.id, null, initial.value.id)).ok).toBe(true);
+    const baseline = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    expect(baseline.ok).toBe(true);
+    if (!baseline.ok) return;
+    const guidance = "Read project guidance before assuming a familiar build command.";
+
+    const first = await createExperienceFedMiniSweCandidate(baseline.value, fixture.objects, fixture.harnesses, guidance);
+    const repeated = await createExperienceFedMiniSweCandidate(baseline.value, fixture.objects, fixture.harnesses, `  ${guidance}\n`);
+
+    expect(first.ok && repeated.ok).toBe(true);
+    if (!first.ok || !repeated.ok) return;
+    expect(repeated.value.id).toBe(first.value.id);
+    expect(first.value.parents).toEqual([baseline.value.id]);
+    const runner = first.value.components.find((component) => component.kind === "runner");
+    const source = Buffer.from(runner?.entrypoint.slice("inline-base64:".length) ?? "", "base64").toString("utf8");
+    expect(source).toContain("Project-scoped experience crystallized from earlier work sessions");
+    expect(source).toContain(guidance);
+    const active = await fixture.harnesses.getActiveHarness(fixture.project.id);
+    expect(active.ok && active.value.id).toBe(initial.value.id);
+    expect((await createExperienceFedMiniSweCandidate(baseline.value, fixture.objects, fixture.harnesses, "")).ok).toBe(false);
   });
 
   it("stores immutable lineage, rejects cross-project parents, and detects activation CAS conflicts", async () => {

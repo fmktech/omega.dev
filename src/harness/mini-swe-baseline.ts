@@ -17,6 +17,8 @@ import type {
 
 export const MINI_SWE_BASELINE_VERSION = "2.4.5";
 const BASELINE_CREATED_AT = "2026-07-06T00:00:00.000Z" as Timestamp;
+const CRYSTALLIZED_CREATED_AT = "2026-07-17T00:00:00.000Z" as Timestamp;
+const BASELINE_SYSTEM_PROMPT = "You are a helpful assistant that can interact with a computer to solve programming tasks.";
 
 // This deliberately reproduces mini-swe-agent's defining harness choices rather
 // than vendoring its Python package: linear message history, bash as the only
@@ -40,9 +42,9 @@ function clipped(output){
   if(output.length<=10000)return {output};
   return {output_head:output.slice(0,5000),output_tail:output.slice(-5000),elided_chars:output.length-10000,warning:"Output too long."};
 }
-function observeProcess(processId,call,offset=0,output=""){
+function observeProcess(processId,call,done,offset=0,output=""){
   request({kind:"process.observe",processId,after:[{stream:"stdout",offset},{stream:"stderr",offset:0}]},reply=>{
-    if(!reply.result?.ok){completeTool(call,{returncode:-1,output:"",exception_info:reply.result?.error?.kind||"process observation failed"},true);return}
+    if(!reply.result?.ok){completeTool(call,{returncode:-1,output:"",exception_info:reply.result?.error?.kind||"process observation failed"},true,done);return}
     const observation=reply.result.value;
     let nextOffset=offset,nextOutput=output;
     for(const slice of observation.slices||[]){
@@ -50,27 +52,29 @@ function observeProcess(processId,call,offset=0,output=""){
       nextOutput+=String(slice.data||"");
     }
     if(observation.state==="starting"||observation.state==="running"){
-      setTimeout(()=>observeProcess(processId,call,nextOffset,nextOutput),50);
+      setTimeout(()=>observeProcess(processId,call,done,nextOffset,nextOutput),50);
       return;
     }
     const match=/\n?__OMEGA_MINI_RC__=(\d+)\s*$/u.exec(nextOutput);
     const returncode=match?Number(match[1]):-1;
     const clean=match?nextOutput.slice(0,match.index):nextOutput;
-    completeTool(call,{returncode,...clipped(clean),exception_info:returncode<0?"process "+observation.state:""},returncode<0);
+    completeTool(call,{returncode,...clipped(clean),exception_info:returncode<0?"process "+observation.state:""},returncode<0,done);
   });
 }
-function completeTool(call,result,isError){
-  messages.push({role:"tool",content:[{kind:"tool-result",callId:call.callId,toolName:"bash",result,isError}]});
-  modelRequest();
+function completeTool(call,result,isError,done){
+  done({kind:"tool-result",callId:call.callId,toolName:"bash",result,isError});
 }
-function executeCall(call){
+function executeCall(call,done){
   const command=String(call.input?.command||"");
-  if(command.trim()==="echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"){finish("succeeded");return}
   const wrapped='bash -lc "$1" 2>&1; rc=$?; printf "\\n__OMEGA_MINI_RC__=%s\\n" "$rc"';
   request({kind:"process.start",spec:{executable:"bash",args:["-lc",wrapped,"omega-mini",command],cwd:start.workspace.path,credentialEnvNames:[],stdin:"closed",timeoutMs:60000,sandbox:{filesystem:"workspace-read-write",network:"none",allowedHosts:[],memoryLimitBytes:536870912,cpuTimeLimitMs:1800000,runtime:{kind:"oci",image:"omega-runner:local",expectedImageDigest:null,containerUser:"1000:1000",workspaceMountPath:"/workspace"}},harnessId:currentHarnessId,sessionId:start.session.id}},reply=>{
-    if(!reply.result?.ok){completeTool(call,{returncode:-1,output:"",exception_info:reply.result?.error?.kind||"process start failed"},true);return}
-    observeProcess(reply.result.value.id,call);
+    if(!reply.result?.ok){completeTool(call,{returncode:-1,output:"",exception_info:reply.result?.error?.kind||"process start failed"},true,done);return}
+    observeProcess(reply.result.value.id,call,done);
   });
+}
+function runCalls(calls,index=0,results=[]){
+  if(index>=calls.length){messages.push({role:"tool",content:results});modelRequest();return}
+  executeCall(calls[index],result=>{results.push(result);runCalls(calls,index+1,results)});
 }
 function modelEvent(event){
   if(event.kind==="tool-call")toolCalls.set(event.call.callId,event.call);
@@ -88,8 +92,10 @@ function modelEvent(event){
     modelRequest();return;
   }
   formatErrors=0;
+  const submissions=calls.filter(call=>String(call.input?.command||"").trim()==="echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT");
+  if(submissions.length>0){finish(calls.length===1&&submissions.length===1?"succeeded":"failed");return}
   messages.push({role:"assistant",content:event.completion.content});
-  executeCall(calls[0]);
+  runCalls(calls);
 }
 function accept(envelope){
   if(envelope.protocol!=="omega-runner-jsonl"||envelope.version!==1)throw new Error("unsupported kernel envelope");
@@ -115,19 +121,76 @@ function accept(envelope){
 process.stdin.setEncoding("utf8");
 process.stdin.on("data",chunk=>{buffer+=chunk;for(;;){const newline=buffer.indexOf("\n");if(newline<0)return;const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);try{accept(JSON.parse(line))}catch(error){emit({kind:"runner.protocol-error",error:{kind:"protocol-error",protocol:"runner-jsonl",message:error instanceof Error?error.message:"invalid kernel JSONL",recoverable:false,callerAction:"abort"}})}}});`;
 
+export function miniSweBaselineRunnerWithProjectExperience(guidance: string): string {
+  const normalized = guidance.trim();
+  if (normalized.length === 0) return MINI_SWE_BASELINE_RUNNER;
+  const experiencedPrompt = [
+    BASELINE_SYSTEM_PROMPT,
+    "Project-scoped experience crystallized from earlier work sessions:",
+    normalized,
+    "Apply these lessons when relevant, but inspect the current repository and prefer its authoritative instructions.",
+  ].join("\n\n");
+  return MINI_SWE_BASELINE_RUNNER.replace(JSON.stringify(BASELINE_SYSTEM_PROMPT), JSON.stringify(experiencedPrompt));
+}
+
 export async function createMiniSweBaselineCandidate(
   incumbent: HarnessManifest,
   objects: ObjectStore,
   harnesses: Pick<HarnessRepository, "putComponent" | "putHarness">,
 ): Promise<Result<HarnessManifest, HarnessError>> {
-  const payload = await putBytes(objects, "text/javascript", MINI_SWE_BASELINE_RUNNER);
+  return createRunnerCandidate(
+    incumbent,
+    objects,
+    harnesses,
+    MINI_SWE_BASELINE_RUNNER,
+    `baseline:mini-swe-agent-v${MINI_SWE_BASELINE_VERSION}`,
+    BASELINE_CREATED_AT,
+  );
+}
+
+export async function createExperienceFedMiniSweCandidate(
+  parent: HarnessManifest,
+  objects: ObjectStore,
+  harnesses: Pick<HarnessRepository, "putComponent" | "putHarness">,
+  guidance: string,
+): Promise<Result<HarnessManifest, HarnessError>> {
+  const normalized = guidance.trim();
+  if (normalized.length === 0) {
+    return { ok: false, error: {
+      kind: "validation",
+      message: "Crystallized project guidance cannot be empty.",
+      field: "guidance",
+      recoverable: true,
+      callerAction: "fix-request",
+    } };
+  }
+  const digest = hash(normalized).slice(0, 16);
+  return createRunnerCandidate(
+    parent,
+    objects,
+    harnesses,
+    miniSweBaselineRunnerWithProjectExperience(normalized),
+    `crystallized:${digest}`,
+    CRYSTALLIZED_CREATED_AT,
+  );
+}
+
+async function createRunnerCandidate(
+  incumbent: HarnessManifest,
+  objects: ObjectStore,
+  harnesses: Pick<HarnessRepository, "putComponent" | "putHarness">,
+  runnerSource: string,
+  aliasSuffix: string,
+  createdAt: Timestamp,
+): Promise<Result<HarnessManifest, HarnessError>> {
+  const payload = await putBytes(objects, "text/javascript", runnerSource);
   if (!payload.ok) return payload;
 
   const runnerBody: Omit<ComponentManifest, "id"> = {
     kind: "runner",
     runtime: "node",
     objectHash: payload.value,
-    entrypoint: `inline-base64:${Buffer.from(MINI_SWE_BASELINE_RUNNER, "utf8").toString("base64")}`,
+    entrypoint: `inline-base64:${Buffer.from(runnerSource, "utf8").toString("base64")}`,
     credentialEnvNames: [],
     capabilities: ["model-call"],
   };
@@ -140,11 +203,11 @@ export async function createMiniSweBaselineCandidate(
 
   const body = {
     projectId: incumbent.projectId,
-    alias: `${incumbent.alias}+baseline:mini-swe-agent-v${MINI_SWE_BASELINE_VERSION}`,
+    alias: `${incumbent.alias}+${aliasSuffix}`,
     parents: [incumbent.id],
     components: [runner, ...incumbent.components.filter((component) => component.kind !== "runner")],
     sourceArtifacts: [...incumbent.sourceArtifacts],
-    createdAt: BASELINE_CREATED_AT,
+    createdAt,
   } as const;
   const manifest: HarnessManifest = {
     id: `harness_${hash(canonical(harnessBody(body)))}` as HarnessId,

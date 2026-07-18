@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { DEFAULT_CONFIG } from "./config/defaults.js";
-import type { AbsolutePath, HarnessId, ModelRoleRoute, ProjectId } from "./contracts/index.js";
+import type { AbsolutePath, HarnessId, ProjectId } from "./contracts/index.js";
 import {
   compileProjectExperience,
   crystallizationTrajectoriesThroughCycle,
@@ -15,12 +15,6 @@ import { createModelRouter } from "./models/model-router.js";
 import { atomicWriteFile, safeStorageKey } from "./persistence/artifact-store.js";
 import { createFileObjectStore } from "./persistence/object-store.js";
 import { createFileProjectRepository } from "./persistence/project-repository.js";
-
-function crystallizerRoute(): ModelRoleRoute {
-  const evaluator = DEFAULT_CONFIG.models.routes.find((route) => route.role === "promotion-evaluator");
-  if (evaluator === undefined) throw new Error("The promotion-evaluator route is not configured.");
-  return { ...evaluator, role: "crystallizer" };
-}
 
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const projectId = argv[0] as ProjectId | undefined;
@@ -48,10 +42,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
     process.stderr.write("Parent harness does not belong to the requested project.\n");
     return 2;
   }
-  const models = createModelRouter(
-    { ...DEFAULT_CONFIG.models, routes: DEFAULT_CONFIG.models.routes.map((route) => route.role === "crystallizer" ? crystallizerRoute() : route) },
-    process.env,
-  );
+  const models = createModelRouter(DEFAULT_CONFIG.models, process.env);
   const crystallized = await crystallizeWorkTrajectories(models, parentHarnessId, trajectories.value);
   if (!crystallized.ok) {
     process.stderr.write(`${JSON.stringify(crystallized.error)}\n`);

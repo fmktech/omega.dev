@@ -1,5 +1,7 @@
 # Continual developer-workstream holdout — 2026-07-18
 
+Reflection-model ablation: [`2026-07-18-luna-reflection-ablation.md`](./2026-07-18-luna-reflection-ablation.md) repeats the same no-selection workstream with GPT-5.6 Luna used only for reflection.
+
 ## Outcome
 
 Five days of automatically accumulated project experience produced a final harness that passed **6/10** holdout tasks, compared with **7/10** for the untouched starting harness.

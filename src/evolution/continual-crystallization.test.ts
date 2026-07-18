@@ -10,6 +10,7 @@ import type {
   TokenCount,
   UsdMicros,
 } from "../contracts/index.js";
+import { DEFAULT_CONFIG } from "../config/defaults.js";
 import type { CrystallizationRun } from "./crystallization-benchmark.js";
 import { evolveContinualWorkstream } from "./continual-crystallization.js";
 
@@ -69,6 +70,20 @@ function crystallization(cycle: number, sourceIds: readonly string[]): Crystalli
 }
 
 describe("continual crystallization", () => {
+  it("routes only reflection through GPT-5.6 Luna", () => {
+    const crystallizer = DEFAULT_CONFIG.models.routes.find((route) => route.role === "crystallizer");
+    const otherModels = DEFAULT_CONFIG.models.routes
+      .filter((route) => route.role !== "crystallizer")
+      .map((route) => route.modelId);
+
+    expect(crystallizer).toMatchObject({
+      providerId: "openrouter",
+      modelId: "openai/gpt-5.6-luna",
+      reasoning: { mode: "effort", effort: "high" },
+    });
+    expect(otherModels).not.toContain("openai/gpt-5.6-luna");
+  });
+
   it("uses every valid workday mutation as the next workday parent without evaluation", async () => {
     const crystallizeParents: HarnessId[] = [];
     const evidenceSizes: number[] = [];

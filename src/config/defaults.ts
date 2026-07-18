@@ -28,12 +28,6 @@ const GPT_OSS_20B_LIST_PRICE = {
   outputUsdMicrosPerMillionTokens: 140_000 as UsdMicros,
 } as const;
 
-const GPT_5_6_LUNA_LIST_PRICE = {
-  inputUsdMicrosPerMillionTokens: 1_000_000 as UsdMicros,
-  cachedInputUsdMicrosPerMillionTokens: 100_000 as UsdMicros,
-  outputUsdMicrosPerMillionTokens: 6_000_000 as UsdMicros,
-} as const;
-
 export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
   schemaVersion: 1,
   homeDirectory: {
@@ -215,24 +209,24 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
       {
         role: "crystallizer",
         providerId: "openrouter",
-        modelId: "openai/gpt-5.6-luna",
+        modelId: "deepseek/deepseek-v4-flash",
         reasoning: { mode: "effort", effort: "high" },
         selection: {
           kind: "openrouter",
-          mode: "balanced",
-          providerOrder: [],
-          allowFallbacks: true,
+          mode: "exacto",
+          providerOrder: ["GMICloud"],
+          allowFallbacks: false,
           requireParameters: true,
           dataCollection: "allow",
           zeroDataRetention: null,
         },
-        temperature: null,
+        temperature: 0,
         topP: null,
         seed: null,
         contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 16_384 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
-        equivalentListPrice: GPT_5_6_LUNA_LIST_PRICE,
+        equivalentListPrice: DEEPSEEK_V4_FLASH_LIST_PRICE,
       },
     ],
   },

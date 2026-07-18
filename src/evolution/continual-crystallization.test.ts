@@ -70,7 +70,7 @@ function crystallization(cycle: number, sourceIds: readonly string[]): Crystalli
 }
 
 describe("continual crystallization", () => {
-  it("routes only reflection through GPT-5.6 Luna", () => {
+  it("routes production reflection back through DeepSeek", () => {
     const crystallizer = DEFAULT_CONFIG.models.routes.find((route) => route.role === "crystallizer");
     const otherModels = DEFAULT_CONFIG.models.routes
       .filter((route) => route.role !== "crystallizer")
@@ -78,7 +78,7 @@ describe("continual crystallization", () => {
 
     expect(crystallizer).toMatchObject({
       providerId: "openrouter",
-      modelId: "openai/gpt-5.6-luna",
+      modelId: "deepseek/deepseek-v4-flash",
       reasoning: { mode: "effort", effort: "high" },
     });
     expect(otherModels).not.toContain("openai/gpt-5.6-luna");

@@ -1,5 +1,7 @@
 # GPT-5.6 Luna reflection ablation — 2026-07-18
 
+> Follow-up: production reflection was restored to DeepSeek V4 Flash. A direct transcript-only component benchmark is recorded in [Reflection component benchmark](./2026-07-18-reflection-component.md); Luna was unavailable through OpenRouter during that run and returned HTTP 404.
+
 ## Outcome
 
 Changing only the five reflection calls from DeepSeek V4 Flash to GPT-5.6 Luna did **not** improve the final always-on harness.

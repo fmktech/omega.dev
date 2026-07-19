@@ -21,6 +21,7 @@
     "benchmark:crystallize-install": "node dist/crystallization-benchmark-main.js",
     "benchmark:continual-crystallize": "node dist/continual-crystallization-benchmark-main.js",
     "benchmark:reflection": "node dist/reflection-benchmark-main.js",
+    "benchmark:reflection-skill-transfer": "node dist/reflection-skill-transfer-benchmark-main.js",
     "cli": "node dist/cli-main.js",
     "start": "node dist/main.js",
     "sandbox:image": "sh scripts/build-sandbox-image.sh",

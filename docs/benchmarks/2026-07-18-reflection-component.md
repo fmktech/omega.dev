@@ -85,4 +85,4 @@ The result supports a two-stage evolution path:
 1. Reflect from the session into evidence-linked candidate knowledge, skill, runner, tool, or policy updates.
 2. Deterministically validate scope, destination, provenance, size, and contradictions before automatic installation.
 
-The next meaningful benchmark should replay sanitized real project sessions and measure whether later tasks retrieve and follow the installed item. It should not tune prompts on these ten scenarios or promote from their hidden scores.
+The first retrieval-and-application follow-up is recorded in [Reflection-to-skill transfer benchmark](./2026-07-19-reflection-skill-transfer.md). It found perfect relevant-task retrieval but zero irrelevant-task precision and exposed information loss when one reflection split a procedure across skill and policy destinations. A stronger successor should use sanitized real project sessions and full workspace execution. It should not tune prompts on these scenarios or promote from their hidden scores.

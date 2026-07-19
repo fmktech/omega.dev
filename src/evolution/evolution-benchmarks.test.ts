@@ -27,6 +27,7 @@ import type {
   HarnessId,
   HarnessManifest,
   HarnessRepository,
+  JsonObject,
   ModelRouteSignature,
   ObjectHash,
   ObjectStore,
@@ -242,20 +243,27 @@ function fakeSessionService(
   };
 }
 
-function fakeObjectStore(): ObjectStore {
+function fakeObjectStore(contents?: Map<ObjectHash, Uint8Array>): ObjectStore {
   return {
     async put(mediaType, chunks) {
       const parts: Uint8Array[] = [];
       for await (const chunk of chunks) parts.push(chunk);
       const content = Buffer.concat(parts);
+      const hash = createHash("sha256").update(content).digest("hex") as ObjectHash;
+      contents?.set(hash, content);
       return { ok: true, value: {
-        hash: createHash("sha256").update(content).digest("hex") as ObjectHash,
+        hash,
         size: content.byteLength as ByteCount,
         mediaType,
         createdAt: timestamp,
       } };
     },
-    get: () => rejectUnexpected(),
+    get: async (hash) => {
+      const content = contents?.get(hash);
+      return content === undefined
+        ? rejectUnexpected()
+        : { ok: true, value: (async function* (): AsyncIterable<Uint8Array> { yield content; })() };
+    },
     describe: () => rejectUnexpected(),
   };
 }
@@ -319,6 +327,23 @@ function mutationEvents(content = "improved harness guidance", replaceComponentI
       },
     },
   ];
+}
+
+function reflectionEvents(proposal: JsonObject): readonly SessionEvent[] {
+  const response = JSON.stringify(proposal);
+  const events = mutationEvents(response);
+  const completed = events[1];
+  if (completed?.payload.kind !== "model.completed") throw new Error("Expected model completion fixture");
+  return [events[0]!, {
+    ...completed,
+    payload: {
+      ...completed.payload,
+      completion: {
+        ...completed.payload.completion,
+        content: [{ kind: "text", text: response }],
+      },
+    },
+  }];
 }
 
 function fakeSessionRepository(events: readonly SessionEvent[] = mutationEvents()): SessionRepository {
@@ -636,6 +661,125 @@ describe("paired promotion evaluation", () => {
 });
 
 describe("evolution lifecycle", () => {
+  it("crystallizes grounded reflection lessons into catalog-ready skill components", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-evolution-reflection-skill-"));
+    try {
+      const contents = new Map<ObjectHash, Uint8Array>();
+      const storedComponents: HarnessManifest["components"][number][] = [];
+      const storedHarnesses: HarnessManifest[] = [];
+      const baseHarnesses = fakeHarnessRepository([harness(incumbentId)]);
+      const harnesses: HarnessRepository = {
+        ...baseHarnesses,
+        putComponent: async (component) => {
+          storedComponents.push(component);
+          return baseHarnesses.putComponent(component);
+        },
+        putHarness: async (manifest) => {
+          storedHarnesses.push(manifest);
+          return baseHarnesses.putHarness(manifest);
+        },
+      };
+      const runPaired = vi.fn<BenchmarkService["runPaired"]>(async (_suite, _incumbent, candidate) => ({
+        ok: true,
+        value: rejectedScorecard(candidate),
+      }));
+      const evidenceArtifactId = "conversation-evidence" as ArtifactId;
+      const service = createEvolutionService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(contents),
+        repository: fakeSessionRepository(reflectionEvents({
+          reflection: "The user established a durable generated-config procedure.",
+          decision: "evolve",
+          lessons: [{
+            sourceIds: [evidenceArtifactId],
+            target: "skill",
+            title: "Regenerate authentication configuration",
+            guidance: "Edit config/service.toml, run tools/render-config, then execute ./verify-auth without touching the web workspace.",
+          }, {
+            sourceIds: [evidenceArtifactId],
+            target: "knowledge",
+            title: "Authentication configuration source",
+            guidance: "config/service.toml is authoritative.",
+          }],
+        })),
+        sessions: fakeSessionService({
+          spawnChild: async () => ({ ok: true, value: fakeChildSession() }),
+          complete: async () => ({ ok: true, value: fakeCompletedChildRecord() }),
+        }),
+        harnesses,
+        benchmarks: { ...fakeBenchmarkService(), runPaired },
+        activation: fakeActivation(),
+      });
+      const started = await service.start({
+        projectId,
+        sourceSessionId: "source" as SessionId,
+        goal: "Reflect on the completed configuration correction and crystallize durable procedures.",
+        evidenceArtifactIds: [evidenceArtifactId],
+        allowedComponentKinds: ["skill"],
+        budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+      }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      const terminal = await waitForEvolutionTerminal(service, started.value.id);
+      expect(terminal.ok && terminal.value.state).toBe("rejected");
+      expect(storedComponents).toHaveLength(1);
+      expect(storedComponents[0]?.kind).toBe("skill");
+      expect(storedComponents[0]?.entrypoint).toBe("skills/regenerate-authentication-configuration/SKILL.md");
+      const markdown = contents.get(storedComponents[0]!.objectHash)?.toString();
+      expect(markdown).toContain("name: regenerate-authentication-configuration");
+      expect(markdown).toContain("description: Regenerate authentication configuration");
+      expect(markdown).toContain("sourceSessionId: source");
+      expect(markdown).toContain("conversation-evidence");
+      expect(markdown).toContain("tools/render-config");
+      expect(storedHarnesses[0]?.parents).toEqual([incumbentId]);
+      expect(storedHarnesses[0]?.sourceArtifacts).toEqual([evidenceArtifactId, "mutation-output"]);
+      expect(runPaired).toHaveBeenCalledOnce();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a grounded no-change reflection as a clean rejection without evaluation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-evolution-reflection-no-change-"));
+    try {
+      const runPaired = vi.fn<BenchmarkService["runPaired"]>(() => rejectUnexpected());
+      const service = createEvolutionService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(),
+        repository: fakeSessionRepository(reflectionEvents({
+          reflection: "The workaround was explicitly temporary and should not become harness behavior.",
+          decision: "no-change",
+          lessons: [],
+        })),
+        sessions: fakeSessionService({
+          spawnChild: async () => ({ ok: true, value: fakeChildSession() }),
+          complete: async () => ({ ok: true, value: fakeCompletedChildRecord() }),
+        }),
+        harnesses: fakeHarnessRepository([harness(incumbentId)]),
+        benchmarks: { ...fakeBenchmarkService(), runPaired },
+        activation: fakeActivation(),
+      });
+      const started = await service.start({
+        projectId,
+        sourceSessionId: "source" as SessionId,
+        goal: "Reflect on whether the one-off workaround should be learned.",
+        evidenceArtifactIds: ["conversation-evidence" as ArtifactId],
+        allowedComponentKinds: ["skill"],
+        budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+      }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      const terminal = await waitForEvolutionTerminal(service, started.value.id);
+      expect(terminal.ok && terminal.value.state).toBe("rejected");
+      expect(terminal.ok && terminal.value.candidateHarnessId).toBeNull();
+      expect(runPaired).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists a child-produced changed component and reloads the terminal job", async () => {
     const root = await mkdtemp(join(tmpdir(), "omega-evolution-persistence-"));
     try {

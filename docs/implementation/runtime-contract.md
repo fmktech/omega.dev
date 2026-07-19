@@ -25,6 +25,8 @@ The host rejects an invalid envelope before dispatch. It caps one line at 1 MiB,
 
 The initial runner's first request after `runner.ready` is `context.bootstrap`; it does not start a model call until `context.bootstrapped` succeeds. The reply contains scoped `AGENTS.md` documents ordered by repository scope plus compact project-knowledge and installed-skill catalogs. `skill.read` names both the current harness and component, and the daemon returns content only when that component is an installed skill owned by the same project.
 
+An evolution child may return either one direct component delta or an evidence-grounded reflection proposal. For a skill-scoped reflection, the daemon compiles only lessons whose target is `skill` into canonical `skills/<name>/SKILL.md` document components. Each document records the source session, evidence artifacts, proposal artifact, cited evidence references, and evidence digest. The candidate remains project-scoped and inactive until the ordinary paired-evaluation path completes. A repeated lesson with the same semantic digest is a no-op; revised guidance replaces the installed skill with the same canonical entrypoint, preserving harness parent lineage rather than growing duplicate skills. A valid `no-change` reflection terminates as rejected without running a promotion evaluation.
+
 ## Exact construction exports
 
 Feature modules export these named factories and annotate them with the corresponding contract-owned `Create*`, `RunCli`, `RenderHtmlApp`, or `StartHttpServer` function type. Local aliases are not substitutes. Factories perform no background work until explicitly noted.

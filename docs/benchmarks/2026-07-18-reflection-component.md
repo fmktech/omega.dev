@@ -74,6 +74,8 @@ The retrieval gap exposed by this benchmark was implemented immediately afterwar
 
 Retrieval relevance is still model-selected in this first slice. A later benchmark should measure catalog recall and whether the runner opens the right document before acting; semantic ranking and automatic path-derived prefetch remain evolvable context-compiler work.
 
+The reflection-to-install gap was also closed afterward. A skill-scoped evolution child may now return the benchmark's reflection schema directly. The daemon compiles only `target: "skill"` lessons into catalog-ready `SKILL.md` components, records session/artifact/reference provenance and evidence hashes, deduplicates semantically identical lessons, replaces revised skills at their stable entrypoint, and sends the resulting inactive candidate through the existing paired evaluation. A valid `no-change` reflection stops cleanly without evaluation.
+
 ## Interpretation
 
 This benchmark is closer to ordinary development than promotion from hidden task results: evolution sees only what the developer and tools revealed during the work. The hidden rubric measures the reflector after the fact but is never fed back into that reflection.

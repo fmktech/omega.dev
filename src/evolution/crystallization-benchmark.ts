@@ -15,8 +15,8 @@ import type {
   TokenCount,
   UsdMicros,
 } from "../contracts/index.js";
-
-export type LearningTarget = "knowledge" | "skill" | "runner" | "tool" | "policy";
+import type { CrystallizedLesson, LearningTarget } from "./learning-types.js";
+export type { CrystallizedLesson, LearningTarget } from "./learning-types.js";
 
 export type WorkTrajectory = {
   readonly id: string;
@@ -24,13 +24,6 @@ export type WorkTrajectory = {
   readonly objective: string;
   readonly timeline: readonly string[];
   readonly locallyObservedResult: string;
-};
-
-export type CrystallizedLesson = {
-  readonly sourceIds: readonly string[];
-  readonly target: LearningTarget;
-  readonly title: string;
-  readonly guidance: string;
 };
 
 export type CrystallizationProposal = {

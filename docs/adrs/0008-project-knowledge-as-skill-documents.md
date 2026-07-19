@@ -30,6 +30,8 @@ Both of these write paths are allowed:
 - the main agent creates or updates knowledge directly when it identifies a useful durable fact;
 - a background post-task crystallization session proposes knowledge extracted from a difficult or successful trajectory.
 
+Repeatable procedures follow the same evidence discipline but become immutable skill components in the project harness. A reflection proposal is not itself an installed skill: the daemon validates its bounded lessons, compiles `target: skill` lessons into canonical `SKILL.md` documents, attaches source-session and artifact provenance, and creates an inactive child harness. Identical semantic lessons are deduplicated; a revised lesson replaces the prior canonical skill entrypoint in a new harness generation. Promotion remains governed by the normal paired evaluation rather than by the reflection model's opinion.
+
 Original session evidence remains authoritative if a knowledge document becomes stale or incorrect.
 
 ## Consequences
@@ -37,6 +39,7 @@ Original session evidence remains authoritative if a knowledge document becomes 
 - Context is retrieved progressively instead of injected wholesale.
 - Knowledge is inspectable and portable without a database client.
 - Retrieval and staleness behavior can evolve as harness components.
+- Reflections produce inspectable skill candidates with provenance and lineage instead of silently rewriting a runner prompt.
 - The daemon needs a small schema validator and provenance/versioning API.
 
 ## Alternatives considered

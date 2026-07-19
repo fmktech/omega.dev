@@ -31,6 +31,9 @@ import type {
 import { DEFAULT_CONFIG } from "../config/defaults.js";
 import { atomicWriteFile, ioError, safeStorageKey } from "../persistence/artifact-store.js";
 import { readAllEvents } from "../sessions/handoffs.js";
+import { createReflectionSkillCandidate } from "./reflection-skills.js";
+import { parseReflectionProposal } from "./reflection-proposal.js";
+import type { ReflectionProposal } from "./reflection-proposal.js";
 
 const COMPONENT_KINDS: ReadonlySet<string> = new Set([
   "runner", "tool", "connector", "skill", "workflow", "context-compiler", "promotion-evaluator", "policy-prompt",
@@ -48,6 +51,10 @@ type ComponentDelta = {
   readonly content: string;
   readonly replaceComponentId: ComponentId | null;
 };
+
+type ChildMutation =
+  | { readonly kind: "component"; readonly delta: ComponentDelta; readonly artifactId: ArtifactId }
+  | { readonly kind: "reflection"; readonly proposal: ReflectionProposal; readonly artifactId: ArtifactId };
 
 function now(): Timestamp {
   return new Date().toISOString() as Timestamp;
@@ -100,7 +107,7 @@ function evolutionObjective(request: EvolutionRequest): string {
   const exampleKind = request.allowedComponentKinds[0] ?? "skill";
   const exampleRuntime = exampleKind === "runner" ? "node" : "document";
   const exampleEntrypoint = exampleKind === "runner" ? "runner.js" : "SKILL.md";
-  return [
+  const instructions = [
     request.goal,
     "Work under a strict synthesis budget. Inspect only the minimum named incumbent source needed, at most once per file. Do not inspect benchmark implementations, verifier assets, or broad contracts.",
     "This is a proposal-only child: after the single necessary file.read, every tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response.",
@@ -111,7 +118,25 @@ function evolutionObjective(request: EvolutionRequest): string {
     "Use replaceComponentId to replace an existing component; omit it or use null to add a non-singleton component.",
     "For a runner mutation, content is the complete executable runner artifact, not the TypeScript factory that embeds it.",
     "The content must be complete executable or document content, not a patch or description of the change.",
-  ].join("\n\n");
+  ];
+  if (request.allowedComponentKinds.includes("skill")) {
+    instructions.push(
+      "When the evidence is a completed project conversation, reflect before mutating. If it establishes a repeatable procedure, you may return the reflection JSON shape below instead of a component delta; the daemon will compile each skill lesson into a canonical SKILL.md. Choose no-change when the behavior was temporary or unsupported.",
+      JSON.stringify({
+        reflection: "short evidence-grounded synthesis",
+        decision: "evolve",
+        lessons: [{
+          sourceIds: [request.evidenceArtifactIds[0] ?? "evidence-artifact-id"],
+          target: "skill",
+          title: "short skill title",
+          guidance: "complete repeatable project procedure",
+        }],
+      }),
+      `Reflection sourceIds must cite only these supplied evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
+      "A reflection may contain lessons for other targets, but this skill-scoped mutation compiles only target=skill lessons.",
+    );
+  }
+  return instructions.join("\n\n");
 }
 
 function evolutionChildCapabilities(parent: CapabilityEnvelope, request: EvolutionRequest): CapabilityEnvelope {
@@ -342,7 +367,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     return { ok: false, error: validation("Evolution was cancelled.", "signal") };
   }
 
-  async function childDelta(job: EvolutionJob): Promise<Result<{ readonly delta: ComponentDelta; readonly artifactId: ArtifactId }, EvolutionError>> {
+  async function childMutation(job: EvolutionJob): Promise<Result<ChildMutation, EvolutionError>> {
     const events = await readAllEvents(options.repository, job.sessionId);
     if (!events.ok) return events;
     for (let index = events.value.length - 1; index >= 0; index -= 1) {
@@ -357,8 +382,19 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
         .filter((part) => part.kind === "text")
         .map((part) => part.text)
         .join("");
+      if (job.request.allowedComponentKinds.includes("skill")) {
+        const reflection = parseReflectionProposal(text, job.request.evidenceArtifactIds);
+        if (reflection.ok) {
+          return {
+            ok: true,
+            value: { kind: "reflection", proposal: reflection.value, artifactId: payload.aggregateArtifactId },
+          };
+        }
+      }
       const parsed = parseDelta(text, job.request.allowedComponentKinds);
-      return parsed.ok ? { ok: true, value: { delta: parsed.value, artifactId: payload.aggregateArtifactId } } : parsed;
+      return parsed.ok
+        ? { ok: true, value: { kind: "component", delta: parsed.value, artifactId: payload.aggregateArtifactId } }
+        : parsed;
     }
     return { ok: false, error: validation("Evolution child produced no recorded model-response component delta.", "childOutput") };
   }
@@ -366,9 +402,21 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
   async function mutate(
     incumbent: HarnessManifest,
     job: EvolutionJob,
-  ): Promise<Result<HarnessManifest, EvolutionError>> {
-    const proposed = await childDelta(job);
+  ): Promise<Result<HarnessManifest | null, EvolutionError>> {
+    const proposed = await childMutation(job);
     if (!proposed.ok) return proposed;
+    if (proposed.value.kind === "reflection") {
+      if (proposed.value.proposal.decision === "no-change") return { ok: true, value: null };
+      return createReflectionSkillCandidate({
+        incumbent,
+        proposal: proposed.value.proposal,
+        sourceSessionId: job.request.sourceSessionId,
+        evidenceArtifactIds: job.request.evidenceArtifactIds,
+        proposalArtifactId: proposed.value.artifactId,
+        alias: `candidate-${String(job.id).slice(0, 12)}`,
+        createdAt: now(),
+      }, options.objects, options.harnesses);
+    }
     const delta = proposed.value.delta;
     let replaceIndex = delta.replaceComponentId === null
       ? -1
@@ -461,6 +509,10 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     const mutated = await mutate(incumbent.value, mutatingResult.value);
     if (!mutated.ok) {
       await finishFailed(id);
+      return;
+    }
+    if (mutated.value === null) {
+      await update(jobs.get(id) ?? mutatingResult.value, { state: "rejected" });
       return;
     }
     if (isCancelled(id)) return;

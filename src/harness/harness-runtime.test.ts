@@ -68,7 +68,7 @@ describe("harness runtime", () => {
     }
     expect(created.value.components.filter((component) => component.kind === "runner")).toHaveLength(1);
     expect(created.value.components.filter((component) => component.kind === "tool").map((component) => component.entrypoint)).toEqual([
-      "file.read", "file.write", "process.start", "process.observe", "process.input", "process.cancel", "subagent.spawn",
+      "artifact.read", "file.read", "file.write", "process.start", "process.observe", "process.input", "process.cancel", "subagent.spawn",
       "subagent.observe", "knowledge.catalog", "knowledge.read", "skill.read", "knowledge.write", "marketplace.search", "marketplace.install",
       "harness.evolve", "harness.status",
     ]);

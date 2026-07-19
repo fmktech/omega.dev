@@ -29,6 +29,7 @@ These records capture the decisions agreed during the Omega.dev design interview
 | [0015](0015-testing-and-ai-feedback-loop.md) | Testing and the AI feedback loop | Accepted |
 | [0016](0016-enforceable-process-sandbox-boundary.md) | Enforceable process sandbox boundary | Accepted |
 | [0017](0017-developer-workstream-and-final-holdout.md) | Developer workstream learning and final holdout evaluation | Accepted |
+| [0018](0018-synthetic-skill-foundry.md) | Synthetic skill foundry and promotion gate | Accepted |
 
 ## Known PRD conflicts
 

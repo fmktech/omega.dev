@@ -16,6 +16,7 @@ This repository is an early implementation. The runtime contract is strict and t
 - Durable JSONL session events, resumable handoffs, child sessions, project knowledge, and a local-only marketplace.
 - Deterministic scoped `AGENTS.md` bootstrap plus compact project-knowledge and installed-skill catalogs; full documents load selectively through typed runner operations.
 - Session reflection can crystallize evidence-linked, project-scoped procedures into immutable `SKILL.md` components; repeated lessons deduplicate and revised lessons replace the prior skill through harness lineage.
+- Skill-only evolution uses an independent synthetic foundry: one child builds the skill, another creates hidden near-transfer/generalization/negative-control fixtures, and paired workspace results gate automatic promotion.
 - OmegaBench-10: ten content-addressed unusual-project tasks with hidden verifiers and paired incumbent/candidate scoring.
 - Project harness evolution with cancellation, canary evidence, automatic promotion, rollback, and quarantine paths.
 

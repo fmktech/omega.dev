@@ -26,6 +26,7 @@ import type {
   Result,
   SessionError,
   SessionRecord,
+  SessionId,
   Timestamp,
 } from "../contracts/index.js";
 import { DEFAULT_CONFIG } from "../config/defaults.js";
@@ -34,6 +35,7 @@ import { readAllEvents } from "../sessions/handoffs.js";
 import { createReflectionSkillCandidate } from "./reflection-skills.js";
 import { parseReflectionProposal } from "./reflection-proposal.js";
 import type { ReflectionProposal } from "./reflection-proposal.js";
+import { compileSkillEvalSuite } from "./skill-foundry.js";
 
 const COMPONENT_KINDS: ReadonlySet<string> = new Set([
   "runner", "tool", "connector", "skill", "workflow", "context-compiler", "promotion-evaluator", "policy-prompt",
@@ -109,7 +111,8 @@ function evolutionObjective(request: EvolutionRequest): string {
   const exampleEntrypoint = exampleKind === "runner" ? "runner.js" : "SKILL.md";
   const instructions = [
     request.goal,
-    "Work under a strict synthesis budget. Inspect only the minimum named incumbent source needed, at most once per file. Do not inspect benchmark implementations, verifier assets, or broad contracts.",
+    `Read the supplied evidence with artifact.read before proposing a mutation. Evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
+    "Work under a strict synthesis budget. Inspect only the minimum named incumbent source needed, at most once per file. Do not inspect benchmark implementations, verifier assets, prior scorecards, or broad contracts.",
     "This is a proposal-only child: after the single necessary file.read, every tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response.",
     "Make the smallest complete mutation that addresses the supplied evidence. Do not repeatedly restate or plan the solution.",
     "Return the proposed harness mutation as the entire final response in this JSON shape, with no prose or code fence:",
@@ -153,6 +156,34 @@ function evolutionChildCapabilities(parent: CapabilityEnvelope, request: Evoluti
   return {
     grants,
     modelRoles: parent.modelRoles.filter((role) => role === "main-coder" || role === "harness-mutator"),
+    maxCostUsdMicros: request.budget.maxCostUsdMicros <= parent.maxCostUsdMicros ? request.budget.maxCostUsdMicros : parent.maxCostUsdMicros,
+    maxModelCalls: Math.min(request.budget.maxModelCalls, parent.maxModelCalls),
+    maxProcessStarts: 0,
+    maxInputTokens: request.budget.maxInputTokens <= parent.maxInputTokens ? request.budget.maxInputTokens : parent.maxInputTokens,
+    maxOutputTokens: request.budget.maxOutputTokens <= parent.maxOutputTokens ? request.budget.maxOutputTokens : parent.maxOutputTokens,
+    wallTimeMs: request.budget.wallTimeMs <= parent.wallTimeMs ? request.budget.wallTimeMs : parent.wallTimeMs,
+    createdAt: now(),
+  };
+}
+
+function skillEvalObjective(request: EvolutionRequest): string {
+  return [
+    "Independently design a hidden synthetic evaluation for the reusable behavior revealed by the supplied evidence.",
+    "Read the supplied evidence artifacts with artifact.read. Do not inspect benchmark implementations, prior scorecards, evaluation results, or any proposed harness mutation.",
+    "Return exactly one JSON object with a fixtures array and no prose or code fence.",
+    "The array must contain exactly one fixture for each variation: near-transfer, generalization, and negative-control.",
+    "Near-transfer should replay the same durable behavior with changed names or values. Generalization should require the underlying procedure in a meaningfully different case. Negative-control should be an adjacent task where the learned behavior must not trigger.",
+    "Each fixture shape is {variation,title,objective,files,checks,invariants}. files is a non-empty map of repository-relative paths to UTF-8 contents. checks and invariants are non-empty arrays of deterministic assertions shaped as {path,equals? ,contains? ,absent?}.",
+    "Keep fixtures tiny, isolated, offline, deterministic, and free of secrets. Hide the checks and invariants from the task-solving runner.",
+    `Opportunity: ${request.goal}`,
+    `Evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
+  ].join("\n\n");
+}
+
+function skillEvalChildCapabilities(parent: CapabilityEnvelope, request: EvolutionRequest): CapabilityEnvelope {
+  return {
+    grants: [],
+    modelRoles: parent.modelRoles.filter((role) => role === "promotion-evaluator"),
     maxCostUsdMicros: request.budget.maxCostUsdMicros <= parent.maxCostUsdMicros ? request.budget.maxCostUsdMicros : parent.maxCostUsdMicros,
     maxModelCalls: Math.min(request.budget.maxModelCalls, parent.maxModelCalls),
     maxProcessStarts: 0,
@@ -324,7 +355,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
 
   async function update(
     job: EvolutionJob,
-    patch: Partial<Pick<EvolutionJob, "candidateHarnessId" | "scorecardId" | "state">>,
+    patch: Partial<Pick<EvolutionJob, "candidateHarnessId" | "scorecardId" | "state" | "suiteId">>,
   ): Promise<Result<EvolutionJob, EvolutionError>> {
     return store({ ...job, ...patch, updatedAt: now() });
   }
@@ -349,29 +380,43 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     const job = jobs.get(id);
     if (job === undefined || job.state === "cancelled") return;
     await update(job, { state: "failed" });
+    if (job.evaluationSessionId !== undefined && job.evaluationSessionId !== null) {
+      const evaluator = await options.repository.get(job.evaluationSessionId);
+      if (evaluator.ok && evaluator.value.outcome === null) {
+        await options.sessions.cancel(job.evaluationSessionId, "Evolution job failed");
+      }
+    }
     await options.sessions.complete(job.sessionId, "failed");
   }
 
-  async function waitForChild(job: EvolutionJob, signal: AbortSignal): Promise<Result<SessionRecord, EvolutionError>> {
+  async function waitForSession(
+    job: EvolutionJob,
+    sessionId: SessionId,
+    label: string,
+    signal: AbortSignal,
+  ): Promise<Result<SessionRecord, EvolutionError>> {
     const deadline = Date.now() + Number(job.request.budget.wallTimeMs);
     while (!signal.aborted) {
-      const child = await options.repository.get(job.sessionId);
+      const child = await options.repository.get(sessionId);
       if (!child.ok) return child;
       if (child.value.outcome !== null) {
         return child.value.outcome === "succeeded"
           ? { ok: true, value: child.value }
-          : { ok: false, error: validation(`Evolution child ended with ${child.value.outcome}.`, "childSession") };
+          : { ok: false, error: validation(`${label} child ended with ${child.value.outcome}.`, "childSession") };
       }
       if (Date.now() >= deadline) {
-        return { ok: false, error: validation("Evolution child exceeded its wall-time budget.", "budget.wallTimeMs") };
+        return { ok: false, error: validation(`${label} child exceeded its wall-time budget.`, "budget.wallTimeMs") };
       }
       await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
     }
     return { ok: false, error: validation("Evolution was cancelled.", "signal") };
   }
 
-  async function childMutation(job: EvolutionJob): Promise<Result<ChildMutation, EvolutionError>> {
-    const events = await readAllEvents(options.repository, job.sessionId);
+  async function childOutput(
+    sessionId: SessionId,
+    label: string,
+  ): Promise<Result<{ readonly text: string; readonly artifactId: ArtifactId }, EvolutionError>> {
+    const events = await readAllEvents(options.repository, sessionId);
     if (!events.ok) return events;
     for (let index = events.value.length - 1; index >= 0; index -= 1) {
       const event = events.value[index];
@@ -381,25 +426,33 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
         && candidate.payload.artifact.id === payload.aggregateArtifactId
         && candidate.payload.artifact.kind === "model-response");
       if (artifact === undefined) continue;
-      const text = payload.completion.content
-        .filter((part) => part.kind === "text")
-        .map((part) => part.text)
-        .join("");
-      if (job.request.allowedComponentKinds.includes("skill")) {
-        const reflection = parseReflectionProposal(text, job.request.evidenceArtifactIds);
-        if (reflection.ok) {
-          return {
-            ok: true,
-            value: { kind: "reflection", proposal: reflection.value, artifactId: payload.aggregateArtifactId },
-          };
-        }
-      }
-      const parsed = parseDelta(text, job.request.allowedComponentKinds);
-      return parsed.ok
-        ? { ok: true, value: { kind: "component", delta: parsed.value, artifactId: payload.aggregateArtifactId } }
-        : parsed;
+      return {
+        ok: true,
+        value: {
+          text: payload.completion.content.filter((part) => part.kind === "text").map((part) => part.text).join(""),
+          artifactId: payload.aggregateArtifactId,
+        },
+      };
     }
-    return { ok: false, error: validation("Evolution child produced no recorded model-response component delta.", "childOutput") };
+    return { ok: false, error: validation(`${label} child produced no recorded model response.`, "childOutput") };
+  }
+
+  async function childMutation(job: EvolutionJob): Promise<Result<ChildMutation, EvolutionError>> {
+    const output = await childOutput(job.sessionId, "Evolution");
+    if (!output.ok) return output;
+    if (job.request.allowedComponentKinds.includes("skill")) {
+      const reflection = parseReflectionProposal(output.value.text, job.request.evidenceArtifactIds);
+      if (reflection.ok) {
+        return {
+          ok: true,
+          value: { kind: "reflection", proposal: reflection.value, artifactId: output.value.artifactId },
+        };
+      }
+    }
+    const parsed = parseDelta(output.value.text, job.request.allowedComponentKinds);
+    return parsed.ok
+      ? { ok: true, value: { kind: "component", delta: parsed.value, artifactId: output.value.artifactId } }
+      : parsed;
   }
 
   async function mutate(
@@ -501,10 +554,22 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       await finishFailed(id);
       return;
     }
-    const child = await waitForChild(diagnosing, signal);
+    const child = await waitForSession(diagnosing, diagnosing.sessionId, "Evolution", signal);
     if (!child.ok || isCancelled(id)) {
       if (!isCancelled(id)) await finishFailed(id);
       return;
+    }
+    const synthetic = diagnosing.request.evaluationMode === "synthetic-skill-suite";
+    if (synthetic) {
+      if (diagnosing.evaluationSessionId === undefined || diagnosing.evaluationSessionId === null) {
+        await finishFailed(id);
+        return;
+      }
+      const evaluator = await waitForSession(diagnosing, diagnosing.evaluationSessionId, "Evaluation", signal);
+      if (!evaluator.ok || isCancelled(id)) {
+        if (!isCancelled(id)) await finishFailed(id);
+        return;
+      }
     }
 
     const mutatingResult = await update(jobs.get(id) ?? diagnosing, { state: "mutating" });
@@ -520,18 +585,52 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     }
     if (isCancelled(id)) return;
 
+    let suite = null;
+    if (synthetic) {
+      const evaluationSessionId = diagnosing.evaluationSessionId;
+      if (evaluationSessionId === undefined || evaluationSessionId === null) {
+        await finishFailed(id);
+        return;
+      }
+      const output = await childOutput(evaluationSessionId, "Evaluation");
+      if (!output.ok) {
+        await finishFailed(id);
+        return;
+      }
+      const compiled = await compileSkillEvalSuite(output.value.text, {
+        projectId: diagnosing.request.projectId,
+        sourceSessionId: diagnosing.request.sourceSessionId,
+        evidenceArtifactIds: diagnosing.request.evidenceArtifactIds,
+        proposalArtifactId: output.value.artifactId,
+        budget: diagnosing.request.budget,
+        createdAt: now(),
+      }, options.objects);
+      if (!compiled.ok) {
+        await finishFailed(id);
+        return;
+      }
+      suite = compiled.value;
+    }
     const evaluatingResult = await update(jobs.get(id) ?? mutatingResult.value, {
       state: "evaluating",
       candidateHarnessId: mutated.value.id,
+      suiteId: suite?.manifest.id ?? null,
     });
     if (!evaluatingResult.ok) return;
     const evaluating = evaluatingResult.value;
-    const scorecard = await options.benchmarks.runPaired(
-      DEFAULT_CONFIG.benchmarks.developmentSuiteId,
-      evaluating.incumbentHarnessId,
-      mutated.value.id,
-      signal,
-    );
+    const scorecard = suite === null
+      ? await options.benchmarks.runPaired(
+        DEFAULT_CONFIG.benchmarks.developmentSuiteId,
+        evaluating.incumbentHarnessId,
+        mutated.value.id,
+        signal,
+      )
+      : await options.benchmarks.runSkillPaired(
+        suite,
+        evaluating.incumbentHarnessId,
+        mutated.value.id,
+        signal,
+      );
     if (!scorecard.ok) {
       if (!isCancelled(id)) await finishFailed(id);
       return;
@@ -552,6 +651,10 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     if (request.allowedComponentKinds.length === 0) {
       return { ok: false, error: validation("At least one mutable component kind is required.", "allowedComponentKinds") };
     }
+    const synthetic = request.evaluationMode === "synthetic-skill-suite";
+    if (synthetic && (request.allowedComponentKinds.length !== 1 || request.allowedComponentKinds[0] !== "skill")) {
+      return { ok: false, error: validation("Synthetic skill evaluation is only valid for a skill-only mutation.", "evaluationMode") };
+    }
     if (!capabilities.grants.some((grant) => grant.kind === "create-harness-candidate")) {
       return { ok: false, error: capabilityDenied() };
     }
@@ -566,6 +669,17 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       capabilityEnvelope: evolutionChildCapabilities(capabilities, request),
     });
     if (!child.ok) return child;
+    const evaluator = synthetic ? await options.sessions.spawnChild({
+      parentSessionId: request.sourceSessionId,
+      role: "promotion-eval",
+      objective: skillEvalObjective(request),
+      contextArtifactIds: request.evidenceArtifactIds,
+      capabilityEnvelope: skillEvalChildCapabilities(capabilities, request),
+    }) : null;
+    if (evaluator !== null && !evaluator.ok) {
+      await options.sessions.cancel(child.value.sessionId, "Synthetic skill evaluator could not be started");
+      return evaluator;
+    }
 
     const createdAt = now();
     const job: EvolutionJob = {
@@ -574,6 +688,9 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       incumbentHarnessId: incumbent.value.id,
       sessionId: child.value.sessionId,
       childId: child.value.childId,
+      evaluationSessionId: evaluator?.ok === true ? evaluator.value.sessionId : null,
+      evaluationChildId: evaluator?.ok === true ? evaluator.value.childId : null,
+      suiteId: null,
       candidateHarnessId: null,
       scorecardId: null,
       state: "queued",
@@ -599,7 +716,14 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     if (child.value.outcome !== "succeeded") {
       return { ok: false, error: validation("Evolution retry requires a succeeded proposal child.", "jobId") };
     }
-    const queued = await store({ ...job, state: "queued", candidateHarnessId: null, scorecardId: null, updatedAt: now() });
+    if (job.evaluationSessionId !== undefined && job.evaluationSessionId !== null) {
+      const evaluator = await options.repository.get(job.evaluationSessionId);
+      if (!evaluator.ok) return evaluator;
+      if (evaluator.value.outcome !== "succeeded") {
+        return { ok: false, error: validation("Evolution retry requires a succeeded evaluation child.", "jobId") };
+      }
+    }
+    const queued = await store({ ...job, state: "queued", candidateHarnessId: null, scorecardId: null, suiteId: null, updatedAt: now() });
     if (!queued.ok) return queued;
     schedule(queued.value);
     return queued;
@@ -631,16 +755,20 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     control?.controller.abort(reason);
     const cancelledResult = await update(job, { state: "cancelled" });
     if (!cancelledResult.ok) return cancelledResult;
-    const sessionCancellation = options.sessions.cancel(job.sessionId, reason);
+    const sessionCancellations = [options.sessions.cancel(job.sessionId, reason)];
+    if (job.evaluationSessionId !== undefined && job.evaluationSessionId !== null) {
+      sessionCancellations.push(options.sessions.cancel(job.evaluationSessionId, reason));
+    }
     if (control !== undefined) {
       await Promise.race([
         control.completion,
         new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
       ]);
     }
-    const session = await sessionCancellation;
-    if (session.ok) return cancelledResult;
-    return { ok: false, error: cancellationError(session.error) };
+    const sessions = await Promise.all(sessionCancellations);
+    const failed = sessions.find((session) => !session.ok);
+    if (failed === undefined || failed.ok) return cancelledResult;
+    return { ok: false, error: cancellationError(failed.error) };
   }
 
   return { start, retry, get, list, cancel };
@@ -671,6 +799,9 @@ async function loadPersistedJobs(root: string, jobs: Map<EvolutionJobId, Evoluti
 function isEvolutionJob(value: unknown): value is EvolutionJob {
   if (!isRecord(value) || typeof value["id"] !== "string" || typeof value["incumbentHarnessId"] !== "string"
     || typeof value["sessionId"] !== "string" || typeof value["childId"] !== "string"
+    || (value["evaluationSessionId"] !== undefined && value["evaluationSessionId"] !== null && typeof value["evaluationSessionId"] !== "string")
+    || (value["evaluationChildId"] !== undefined && value["evaluationChildId"] !== null && typeof value["evaluationChildId"] !== "string")
+    || (value["suiteId"] !== undefined && value["suiteId"] !== null && typeof value["suiteId"] !== "string")
     || (value["candidateHarnessId"] !== null && typeof value["candidateHarnessId"] !== "string")
     || (value["scorecardId"] !== null && typeof value["scorecardId"] !== "string")
     || typeof value["state"] !== "string" || !TERMINAL_STATES.has(value["state"] as EvolutionJob["state"])
@@ -684,6 +815,8 @@ function isEvolutionJob(value: unknown): value is EvolutionJob {
     && request["evidenceArtifactIds"].every((item) => typeof item === "string")
     && Array.isArray(request["allowedComponentKinds"])
     && request["allowedComponentKinds"].every((item) => typeof item === "string" && COMPONENT_KINDS.has(item))
+    && (request["evaluationMode"] === undefined || request["evaluationMode"] === "development-suite"
+      || request["evaluationMode"] === "synthetic-skill-suite")
     && isRecord(request["budget"]);
 }
 

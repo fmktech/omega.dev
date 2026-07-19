@@ -626,7 +626,9 @@ function isEvolutionRequest(value: JsonValue | undefined): boolean {
   if (!isObject(value) || !isId(value["projectId"]) || !isId(value["sourceSessionId"]) || !isNonEmptyString(value["goal"])
     || !isArray(value["evidenceArtifactIds"], isId)
     || !isArray(value["allowedComponentKinds"], (kind) => typeof kind === "string" && COMPONENT_KINDS.has(kind))
-    || !isObject(value["budget"])) return false;
+    || !isObject(value["budget"])
+    || (value["evaluationMode"] !== undefined && value["evaluationMode"] !== "development-suite"
+      && value["evaluationMode"] !== "synthetic-skill-suite")) return false;
   const budget = value["budget"];
   return isPositiveInteger(budget["wallTimeMs"]) && isNonNegativeInteger(budget["maxModelCalls"])
     && isNonNegativeInteger(budget["maxInputTokens"]) && isNonNegativeInteger(budget["maxOutputTokens"])

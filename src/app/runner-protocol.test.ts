@@ -210,6 +210,51 @@ describe("runner protocol dispatcher", () => {
     expect(boundaryCalls).toEqual(["artifact.read"]);
   });
 
+  it("lets an isolated child read only artifacts explicitly supplied in its continuation", async () => {
+    const suppliedArtifactId = "artifact-supplied" as ArtifactId;
+    const requestId = "request-supplied-artifact" as RequestId;
+    const sent: KernelToRunnerEnvelope[] = [];
+    const base = sessionRecord();
+    const record: SessionRecord = {
+      ...base,
+      header: {
+        ...base.header,
+        parentSessionId: "session-parent" as SessionId,
+        role: "evolution",
+        continuation: {
+          sourceSessionId: "session-parent" as SessionId,
+          handoffArtifactId: "artifact-handoff" as ArtifactId,
+          contextArtifactIds: [suppliedArtifactId],
+        },
+      },
+    };
+    const artifact = {
+      id: suppliedArtifactId,
+      kind: "model-response" as const,
+      object: { hash: "supplied-object" as ObjectHash, size: 8 as ByteCount, mediaType: "text/plain", createdAt: NOW },
+      sessionId: "session-parent" as SessionId,
+      createdAt: NOW,
+      metadata: {},
+    };
+    const context = {
+      runners: staticRunner([
+        runnerRequest({ kind: "artifact.read", requestId, artifactId: suppliedArtifactId, offset: 0 as ByteCount, limit: 8 as ByteCount }),
+      ], sent),
+      sessionRepository: {
+        async get() { return { ok: true, value: record }; },
+        async readArtifact() {
+          return { ok: true, value: { artifact, range: { startInclusive: 0 as ByteCount, endExclusive: 8 as ByteCount }, encoding: "utf8" as const, data: "evidence", complete: true } };
+        },
+      },
+    } as unknown as OmegaContext;
+
+    createRunnerProtocolDispatcher(() => context).start(SESSION_ID);
+    await waitFor(() => sent.filter(isReplyEnvelope).length === 1);
+
+    const reply = sent.find(isReplyEnvelope)?.message.reply;
+    expect(reply).toMatchObject({ kind: "artifact.read", requestId, result: { ok: true, value: { data: "evidence" } } });
+  });
+
   it("records aggregate process evidence once when observation discovers natural completion", async () => {
     const toolProcessId = "process-tool" as ProcessId;
     const requests: RunnerToKernelEnvelope[] = [

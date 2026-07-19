@@ -102,6 +102,7 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
             ? denied("read-files", "The skill harness does not belong to this runner project")
             : await context.context.readSkill(request.harnessId, request.componentId);
         reply = { kind: "skill.read", requestId: request.requestId, result };
+        if (result.ok) await context.sessions.recordRunnerEvent(sessionId, { kind: "skill.loaded", componentId: result.value.componentId }, harnessId);
         break;
       }
       case "model.start": {
@@ -192,11 +193,15 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
       }
       case "artifact.read": {
         const result = await context.sessionRepository.readArtifact(request.artifactId, request.offset, request.limit);
+        const continuation = session.value.header.continuation;
+        const suppliedArtifactIds = continuation === null
+          ? []
+          : [continuation.handoffArtifactId, ...continuation.contextArtifactIds];
         reply = {
           kind: "artifact.read",
           requestId: request.requestId,
-          result: result.ok && result.value.artifact.sessionId !== sessionId
-            ? denied("read-files", "The artifact is not owned by this runner session")
+          result: result.ok && result.value.artifact.sessionId !== sessionId && !suppliedArtifactIds.includes(request.artifactId)
+            ? denied("read-files", "The artifact is neither owned by nor explicitly supplied to this runner session")
             : result,
         };
         break;

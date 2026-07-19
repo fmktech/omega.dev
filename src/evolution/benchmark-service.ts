@@ -21,6 +21,8 @@ import type {
   Result,
   ScorecardId,
   Sha256,
+  SkillEvalPrivateTask,
+  SkillEvalSuite,
   Timestamp,
 } from "../contracts/index.js";
 import { DEFAULT_CONFIG } from "../config/defaults.js";
@@ -142,20 +144,23 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     harness: HarnessManifest,
     route: ModelRouteSignature,
     signal?: AbortSignal,
+    targetManifest: BenchmarkManifest = manifest,
+    privateTaskOverride: SkillEvalPrivateTask | null = null,
+    enforceSkillUse = false,
   ): Promise<Result<BenchmarkRun, EvolutionError>> {
     if (isAborted(signal)) return cancellation();
     const ready = await ensureLoaded();
     if (!ready.ok) return ready;
     if (isAborted(signal)) return cancellation();
-    const task = manifest.tasks.find((candidate) => candidate.id === taskId);
+    const task = targetManifest.tasks.find((candidate) => candidate.id === taskId);
     if (task === undefined) return { ok: false, error: notFound("benchmark-task", taskId) };
-    const privateTask = resolveTrustedOmegaBenchPrivateTask(taskId);
+    const privateTask = privateTaskOverride ?? resolveTrustedOmegaBenchPrivateTask(taskId);
     if (privateTask === null) return { ok: false, error: notFound("benchmark-private-task", taskId) };
 
     const launched = await options.launcher.execute({
-      suiteId: manifest.id,
-      manifestVersion: manifest.version,
-      promotionPolicy: manifest.promotionPolicy,
+      suiteId: targetManifest.id,
+      manifestVersion: targetManifest.version,
+      promotionPolicy: targetManifest.promotionPolicy,
       task,
       privateTask,
       harness,
@@ -163,9 +168,14 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     }, signal);
     if (!launched.ok) return launched;
 
+    const skillUseMismatch = enforceSkillUse && privateTaskOverride !== null && (
+      (privateTaskOverride.skillUseExpectation === "required" && launched.value.metrics.skillReads < 1)
+      || (privateTaskOverride.skillUseExpectation === "forbidden" && launched.value.metrics.skillReads > 0)
+    );
+    const outcome = skillUseMismatch && launched.value.outcome === "passed" ? "failed" : launched.value.outcome;
     const run: BenchmarkRun = {
       id: randomUUID() as BenchmarkRunId,
-      suiteId: manifest.id,
+      suiteId: targetManifest.id,
       taskId,
       sessionId: launched.value.sessionId,
       harnessId: harness.id,
@@ -176,10 +186,12 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
       fixtureObjectHash: task.fixtureObjectHash,
       environmentObjectHash: task.environmentObjectHash,
       effectiveBudget: task.budget,
-      benchmarkManifestVersion: manifest.version,
-      promotionPolicyId: manifest.promotionPolicy.id,
-      outcome: launched.value.outcome,
-      failureCategory: launched.value.failureCategory,
+      benchmarkManifestVersion: targetManifest.version,
+      promotionPolicyId: targetManifest.promotionPolicy.id,
+      outcome,
+      failureCategory: skillUseMismatch
+        ? privateTaskOverride?.skillUseExpectation === "required" ? "skill-not-loaded" : "skill-over-triggered"
+        : launched.value.failureCategory,
       metrics: launched.value.metrics,
       finalDiffArtifactId: launched.value.finalDiffArtifactId,
       reportArtifactId: launched.value.reportArtifactId,
@@ -226,7 +238,6 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     if (incumbent.value.projectId !== candidate.value.projectId) {
       return { ok: false, error: validation("Paired harnesses must belong to the same project.", "candidateId") };
     }
-
     const evaluatorRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "promotion-evaluator");
     if (evaluatorRoute === undefined) {
       return { ok: false, error: validation("The promotion-evaluator route is not configured.", "models.routes") };
@@ -277,6 +288,85 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     return { ok: true, value: scorecard };
   }
 
+  async function runSkillPaired(
+    suite: SkillEvalSuite,
+    incumbentId: HarnessManifest["id"],
+    candidateId: HarnessManifest["id"],
+    signal?: AbortSignal,
+  ): Promise<Result<PromotionScorecard, EvolutionError>> {
+    if (isAborted(signal)) return cancellation();
+    const ready = await ensureLoaded();
+    if (!ready.ok) return ready;
+    const variations = new Set(suite.privateTasks.map((task) => task.variation));
+    if (suite.manifest.tasks.length !== 3 || suite.privateTasks.length !== 3
+      || !["near-transfer", "generalization", "negative-control"].every((variation) => variations.has(variation as SkillEvalPrivateTask["variation"]))) {
+      return { ok: false, error: validation("A skill Promotion Eval requires exactly three canonical variations.", "suite.privateTasks") };
+    }
+    if (incumbentId === candidateId) {
+      return { ok: false, error: validation("Incumbent and candidate harness IDs must differ.", "candidateId") };
+    }
+    const incumbent = await options.harnesses.getHarness(incumbentId);
+    if (!incumbent.ok) return incumbent;
+    const candidate = await options.harnesses.getHarness(candidateId);
+    if (!candidate.ok) return candidate;
+    if (incumbent.value.projectId !== candidate.value.projectId) {
+      return { ok: false, error: validation("Paired harnesses must belong to the same project.", "candidateId") };
+    }
+    const incumbentComponentIds = new Set(incumbent.value.components.map((component) => component.id));
+    const candidateSkillComponentIds = candidate.value.components
+      .filter((component) => component.kind === "skill" && !incumbentComponentIds.has(component.id))
+      .map((component) => component.id);
+    if (candidateSkillComponentIds.length === 0) {
+      return { ok: false, error: validation("A synthetic skill evaluation requires a candidate-only skill component.", "candidateId") };
+    }
+    const evaluatorRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "promotion-evaluator");
+    if (evaluatorRoute === undefined) {
+      return { ok: false, error: validation("The promotion-evaluator route is not configured.", "models.routes") };
+    }
+    const route = routeSignature(evaluatorRoute);
+    const privateById = new Map(suite.privateTasks.map((task) => [task.taskId, task] as const));
+    const pairedResults: PairedTaskResult[] = [];
+    for (const task of suite.manifest.tasks) {
+      const privateTask = privateById.get(task.id);
+      if (privateTask === undefined) return { ok: false, error: validation("Synthetic suite private task is missing.", "suite.privateTasks") };
+      const scopedPrivateTask: SkillEvalPrivateTask = { ...privateTask, skillComponentIds: candidateSkillComponentIds };
+      const incumbentRuns: BenchmarkRun[] = [];
+      const candidateRuns: BenchmarkRun[] = [];
+      for (let replicate = 0; replicate < suite.manifest.promotionPolicy.replicatesPerHarness; replicate += 1) {
+        if (isAborted(signal)) return cancellation();
+        const incumbentRun = await runTaskWithHarness(task.id, incumbent.value, route, signal, suite.manifest, scopedPrivateTask, false);
+        if (!incumbentRun.ok) return incumbentRun;
+        incumbentRuns.push(incumbentRun.value);
+        if (isAborted(signal)) return cancellation();
+        const candidateRun = await runTaskWithHarness(task.id, candidate.value, route, signal, suite.manifest, scopedPrivateTask, true);
+        if (!candidateRun.ok) return candidateRun;
+        candidateRuns.push(candidateRun.value);
+      }
+      pairedResults.push(...pairReplicateRuns(incumbentRuns, candidateRuns));
+    }
+    const scorecard = buildPromotionScorecard({
+      projectId: incumbent.value.projectId,
+      incumbentHarnessId: incumbentId,
+      candidateHarnessId: candidateId,
+      policy: suite.manifest.promotionPolicy,
+      pairedResults,
+      expectedPairCount: suite.manifest.tasks.length * suite.manifest.promotionPolicy.replicatesPerHarness,
+      createdAt: now(),
+    });
+    const persisted = await persistBenchmarkRecord(String(options.root), "scorecards", scorecard.id, scorecard);
+    if (!persisted.ok) return persisted;
+    scorecards.set(scorecard.id, scorecard);
+    if (isAborted(signal)) return cancellation();
+    if (scorecard.decision.outcome === "promote") {
+      const activated = await options.activation.promote(
+        { ...scorecard, decision: scorecard.decision },
+        () => !isAborted(signal),
+      );
+      if (!activated.ok) return isAborted(signal) ? cancellation() : activated;
+    }
+    return { ok: true, value: scorecard };
+  }
+
   async function getScorecard(id: ScorecardId): Promise<Result<PromotionScorecard, EvolutionError>> {
     const ready = await ensureLoaded();
     if (!ready.ok) return ready;
@@ -302,6 +392,7 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     getManifest,
     runTask,
     runPaired,
+    runSkillPaired,
     getScorecard,
     listScorecards,
     recordCanary: async (harnessId, source) => {

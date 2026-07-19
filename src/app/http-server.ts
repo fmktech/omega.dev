@@ -187,6 +187,10 @@ function validateEvolutionRequest(value: JsonValue | undefined): void {
   const kinds = requireStringArray(nested["allowedComponentKinds"], "request.allowedComponentKinds");
   const allowedKinds = new Set(["runner", "tool", "connector", "skill", "workflow", "context-compiler", "promotion-evaluator", "policy-prompt"]);
   if (kinds.some((kind) => !allowedKinds.has(kind))) throw boundaryValidation("request.allowedComponentKinds contains an invalid kind", "request.allowedComponentKinds");
+  if (nested["evaluationMode"] !== undefined && nested["evaluationMode"] !== "development-suite"
+    && nested["evaluationMode"] !== "synthetic-skill-suite") {
+    throw boundaryValidation("request.evaluationMode is invalid", "request.evaluationMode");
+  }
   const budget = requireObject(nested["budget"], "request.budget");
   requirePositiveInteger(budget["wallTimeMs"], "request.budget.wallTimeMs");
   requirePositiveInteger(budget["maxModelCalls"], "request.budget.maxModelCalls");

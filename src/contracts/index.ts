@@ -1059,6 +1059,7 @@ export type PersistedEventPayload =
   | { readonly kind: "child.completed"; readonly child: ChildSessionRecord; readonly resultArtifactId: ArtifactId }
   | { readonly kind: "artifact.recorded"; readonly artifact: ArtifactRecord }
   | { readonly kind: "knowledge.updated"; readonly documentId: KnowledgeDocumentId; readonly objectHash: ObjectHash }
+  | { readonly kind: "skill.loaded"; readonly componentId: ComponentId }
   | { readonly kind: "marketplace.published"; readonly artifactId: MarketplaceArtifactId; readonly state: MarketplaceState }
   | { readonly kind: "evolution.updated"; readonly jobId: EvolutionJobId; readonly state: EvolutionState }
   | { readonly kind: "benchmark.completed"; readonly runId: BenchmarkRunId; readonly outcome: BenchmarkOutcome }
@@ -1211,6 +1212,25 @@ export type BenchmarkTaskPrivate = {
   readonly diagnosticTags: readonly string[];
 };
 
+export type SkillEvalVariation = "near-transfer" | "generalization" | "negative-control";
+export type SkillUseExpectation = "required" | "forbidden";
+
+export type SkillEvalPrivateTask = BenchmarkTaskPrivate & {
+  readonly variation: SkillEvalVariation;
+  readonly skillUseExpectation: SkillUseExpectation;
+  /** Candidate-only skill IDs, injected by the trusted paired runner after synthesis. */
+  readonly skillComponentIds?: readonly ComponentId[];
+};
+
+/** A per-opportunity synthetic suite. Private tasks stay daemon-side. */
+export type SkillEvalSuite = {
+  readonly manifest: BenchmarkManifest;
+  readonly privateTasks: readonly SkillEvalPrivateTask[];
+  readonly sourceSessionId: SessionId;
+  readonly evidenceArtifactIds: readonly ArtifactId[];
+  readonly proposalArtifactId: ArtifactId;
+};
+
 export type PromotionEvalPolicy = {
   readonly id: string;
   readonly version: string;
@@ -1252,6 +1272,7 @@ export type BenchmarkMetrics = {
   readonly retries: number;
   readonly childSessions: number;
   readonly harnessUpdates: number;
+  readonly skillReads: number;
 };
 
 export type BenchmarkRun = {
@@ -1373,6 +1394,8 @@ export type EvolutionRequest = {
   readonly evidenceArtifactIds: readonly ArtifactId[];
   readonly allowedComponentKinds: readonly ComponentKind[];
   readonly budget: BenchmarkBudget;
+  /** Skill-only requests may build a hidden synthetic suite instead of using the shared development suite. */
+  readonly evaluationMode?: "development-suite" | "synthetic-skill-suite";
 };
 
 export type EvolutionJob = {
@@ -1381,6 +1404,10 @@ export type EvolutionJob = {
   readonly incumbentHarnessId: HarnessId;
   readonly sessionId: SessionId;
   readonly childId: ChildId;
+  /** Independent hidden-suite designer; absent on persisted pre-foundry jobs and ordinary evolution. */
+  readonly evaluationSessionId?: SessionId | null;
+  readonly evaluationChildId?: ChildId | null;
+  readonly suiteId?: BenchmarkSuiteId | null;
   readonly candidateHarnessId: HarnessId | null;
   readonly scorecardId: ScorecardId | null;
   readonly state: EvolutionState;
@@ -1658,6 +1685,8 @@ export interface BenchmarkService {
   runTask(suiteId: BenchmarkSuiteId, taskId: BenchmarkTaskId, harnessId: HarnessId, route: ModelRouteSignature): Promise<Result<BenchmarkRun, EvolutionError>>;
   /** The evaluator is derived from the incumbent harness; callers cannot supply it. */
   runPaired(suiteId: BenchmarkSuiteId, incumbentId: HarnessId, candidateId: HarnessId, signal?: AbortSignal): Promise<Result<PromotionScorecard, EvolutionError>>;
+  /** Runs one daemon-generated three-fixture skill suite; private fixtures never reach either synthesis child. */
+  runSkillPaired(suite: SkillEvalSuite, incumbentId: HarnessId, candidateId: HarnessId, signal?: AbortSignal): Promise<Result<PromotionScorecard, EvolutionError>>;
   getScorecard(id: ScorecardId): Promise<Result<PromotionScorecard, EvolutionError>>;
   listScorecards(projectId: ProjectId, page: PageRequest): Promise<Result<Page<PromotionScorecard>, EvolutionError>>;
   recordCanary(harnessId: HarnessId, source: CanarySource): Promise<Result<CanaryResult, EvolutionError>>;

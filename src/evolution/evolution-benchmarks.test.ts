@@ -39,6 +39,7 @@ import type {
   SessionRecord,
   SessionRepository,
   SessionService,
+  SkillEvalSuite,
   ThreadId,
   Timestamp,
   TokenCount,
@@ -125,6 +126,7 @@ function run(id: string, harnessId: HarnessId, taskId: BenchmarkTaskId, passed: 
       retries: 0,
       childSessions: 0,
       harnessUpdates: 0,
+      skillReads: 0,
     },
     finalDiffArtifactId: `diff-${id}` as ArtifactId,
     reportArtifactId: `report-${id}` as ArtifactId,
@@ -142,6 +144,63 @@ function harness(id: HarnessId): HarnessManifest {
     components: [],
     sourceArtifacts: [],
     createdAt: timestamp,
+  };
+}
+
+function skillCandidateHarness(): HarnessManifest {
+  return {
+    ...harness(candidateId),
+    components: [{
+      id: "component-foundry-skill" as ComponentId,
+      kind: "skill",
+      runtime: "document",
+      objectHash: "foundry-skill-object" as ObjectHash,
+      entrypoint: "SKILL.md",
+      credentialEnvNames: [],
+      capabilities: [],
+    }],
+  };
+}
+
+function skillEvalSuite(): SkillEvalSuite {
+  const variations = ["near-transfer", "generalization", "negative-control"] as const;
+  const tasks = variations.map((variation) => ({
+    id: `skill-${variation}@1` as BenchmarkTaskId,
+    title: variation,
+    objective: `Complete the ${variation} task.`,
+    fixtureObjectHash: `${variation}-fixture` as ObjectHash,
+    environmentObjectHash: `${variation}-environment` as ObjectHash,
+    budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+  }));
+  return {
+    manifest: {
+      id: "skill-foundry-test@1" as SkillEvalSuite["manifest"]["id"],
+      name: "Skill foundry test",
+      version: "1",
+      tasks,
+      privateTaskMetadataObjectHash: "private-index" as ObjectHash,
+      promotionPolicy: {
+        id: "skill-foundry-test-policy@1",
+        version: "1",
+        replicatesPerHarness: 1,
+        thresholds: { minimumComparablePairs: 3, minimumSuccessRateDelta: 1 / 3, maximumProtectedRegressions: 0, confidenceLevel: 0.8 },
+        protectedTaskIds: tasks.map((task) => task.id),
+        workspaceBaseline: "fixture-object-hash",
+        comparisonOrder: ["invariants", "capability", "cost", "latency"],
+      },
+      createdAt: timestamp,
+    },
+    privateTasks: tasks.map((task, index) => ({
+      taskId: task.id,
+      verifierObjectHash: `${index}-verifier` as ObjectHash,
+      negativeInvariantObjectHash: `${index}-invariant` as ObjectHash,
+      diagnosticTags: [variations[index]!],
+      variation: variations[index]!,
+      skillUseExpectation: variations[index] === "negative-control" ? "forbidden" : "required",
+    })),
+    sourceSessionId: "source" as SessionId,
+    evidenceArtifactIds: ["source-evidence" as ArtifactId],
+    proposalArtifactId: "suite-proposal" as ArtifactId,
   };
 }
 
@@ -346,6 +405,39 @@ function reflectionEvents(proposal: JsonObject): readonly SessionEvent[] {
   }];
 }
 
+function foundryFixture(variation: "near-transfer" | "generalization" | "negative-control", objective: string) {
+  return {
+    variation,
+    title: variation,
+    objective,
+    files: { "config/service.toml": "timeout = 30\nlockout = 5\n", "docs/auth.md": "# Auth\n" },
+    checks: variation === "negative-control"
+      ? [{ path: "docs/auth.md", contains: "troubleshooting" }]
+      : [{ path: "config/service.toml", contains: variation === "near-transfer" ? "45" : "7" }],
+    invariants: variation === "negative-control"
+      ? [{ path: "config/service.toml", equals: "timeout = 30\nlockout = 5\n" }]
+      : [{ path: "docs/auth.md", equals: "# Auth\n" }],
+  };
+}
+
+function textEvents(text: string, sessionId: SessionId, artifactId: ArtifactId): readonly SessionEvent[] {
+  const events = mutationEvents(text);
+  const artifact = events[0];
+  const completed = events[1];
+  if (artifact?.payload.kind !== "artifact.recorded" || completed?.payload.kind !== "model.completed") throw new Error("Invalid event fixture");
+  return [{
+    ...artifact,
+    payload: { ...artifact.payload, artifact: { ...artifact.payload.artifact, id: artifactId, sessionId } },
+  }, {
+    ...completed,
+    payload: {
+      ...completed.payload,
+      aggregateArtifactId: artifactId,
+      completion: { ...completed.payload.completion, content: [{ kind: "text", text }] },
+    },
+  }];
+}
+
 function fakeSessionRepository(events: readonly SessionEvent[] = mutationEvents()): SessionRepository {
   return {
     create: () => rejectUnexpected(),
@@ -374,6 +466,7 @@ function fakeBenchmarkService(): BenchmarkService {
     getManifest: () => rejectUnexpected(),
     runTask: () => rejectUnexpected(),
     runPaired: () => rejectUnexpected(),
+    runSkillPaired: () => rejectUnexpected(),
     getScorecard: () => rejectUnexpected(),
     listScorecards: () => rejectUnexpected(),
     recordCanary: () => rejectUnexpected(),
@@ -499,6 +592,101 @@ describe("paired promotion evaluation", () => {
     const regression = pairReplicateRuns([run("i2", incumbentId, taskId, true)], [run("c2", candidateId, taskId, false)]);
     const permissive = { ...policy, thresholds: { ...policy.thresholds, minimumSuccessRateDelta: -1 } };
     expect(assessPromotion(regression, permissive, 1).decision.outcome).toBe("reject");
+  });
+
+  it("promotes a skill only after three synthetic paired fixtures improve without over-triggering", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-skill-foundry-paired-"));
+    try {
+      const suite = skillEvalSuite();
+      const execute = vi.fn<BenchmarkRunLauncher["execute"]>(async (request) => {
+        const isCandidate = request.harness.id === candidateId;
+        const privateTask = request.privateTask as SkillEvalSuite["privateTasks"][number];
+        expect(privateTask.skillComponentIds).toEqual(["component-foundry-skill"]);
+        const passed = privateTask.variation === "negative-control" || isCandidate;
+        const skillReads = !isCandidate ? 0 : privateTask.variation === "negative-control" ? 0 : 1;
+        return { ok: true, value: {
+          sessionId: `session-${request.harness.id}-${request.task.id}` as SessionId,
+          executionPolicyComponentId: "policy" as ComponentId,
+          route: { ...request.route, servingProvider: "provider-a", quantization: "fp8" },
+          servingProviderGenerationId: "generation",
+          outcome: passed ? "passed" : "failed",
+          failureCategory: passed ? null : "verification",
+          metrics: { ...run("template", request.harness.id, request.task.id, passed).metrics, skillReads },
+          finalDiffArtifactId: `diff-${request.harness.id}-${request.task.id}` as ArtifactId,
+          reportArtifactId: `report-${request.harness.id}-${request.task.id}` as ArtifactId,
+          startedAt: timestamp,
+          completedAt: timestamp,
+        } };
+      });
+      const promote = vi.fn<HarnessActivationService["promote"]>(async (scorecard) => ({ ok: true, value: {
+        projectId,
+        previousHarnessId: incumbentId,
+        activeHarnessId: scorecard.candidateHarnessId,
+        reason: "promotion",
+        scorecardId: scorecard.id,
+        activatedAt: timestamp,
+      } }));
+      const service = createBenchmarkService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(),
+        sessions: fakeSessionService(),
+        harnesses: fakeHarnessRepository([harness(incumbentId), skillCandidateHarness()]),
+        activation: { ...fakeActivation(), promote },
+        launcher: { execute },
+      });
+
+      const result = await service.runSkillPaired(suite, incumbentId, candidateId);
+
+      expect(result.ok && result.value.decision.outcome).toBe("promote");
+      expect(result.ok && result.value.observedSuccessRateDelta).toBeCloseTo(2 / 3);
+      expect(execute).toHaveBeenCalledTimes(6);
+      expect(promote).toHaveBeenCalledOnce();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a useful skill when it loads on the synthetic negative control", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-skill-foundry-overtrigger-"));
+    try {
+      const suite = skillEvalSuite();
+      const execute = vi.fn<BenchmarkRunLauncher["execute"]>(async (request) => {
+        const isCandidate = request.harness.id === candidateId;
+        const privateTask = request.privateTask as SkillEvalSuite["privateTasks"][number];
+        const passed = privateTask.variation === "negative-control" || isCandidate;
+        return { ok: true, value: {
+          sessionId: `session-${request.harness.id}-${request.task.id}` as SessionId,
+          executionPolicyComponentId: "policy" as ComponentId,
+          route: { ...request.route, servingProvider: "provider-a", quantization: "fp8" },
+          servingProviderGenerationId: "generation",
+          outcome: passed ? "passed" : "failed",
+          failureCategory: passed ? null : "verification",
+          metrics: { ...run("template", request.harness.id, request.task.id, passed).metrics, skillReads: isCandidate ? 1 : 0 },
+          finalDiffArtifactId: `diff-${request.harness.id}-${request.task.id}` as ArtifactId,
+          reportArtifactId: `report-${request.harness.id}-${request.task.id}` as ArtifactId,
+          startedAt: timestamp,
+          completedAt: timestamp,
+        } };
+      });
+      const promote = vi.fn<HarnessActivationService["promote"]>(() => rejectUnexpected());
+      const service = createBenchmarkService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(),
+        sessions: fakeSessionService(),
+        harnesses: fakeHarnessRepository([harness(incumbentId), skillCandidateHarness()]),
+        activation: { ...fakeActivation(), promote },
+        launcher: { execute },
+      });
+
+      const result = await service.runSkillPaired(suite, incumbentId, candidateId);
+
+      expect(result.ok && result.value.decision).toMatchObject({ outcome: "reject" });
+      expect(result.ok && result.value.pairedResults.find((pair) => pair.taskId.includes("negative-control"))?.candidate.failureCategory)
+        .toBe("skill-over-triggered");
+      expect(promote).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("reloads crash-safe benchmark runs and scorecards after service recreation", async () => {
@@ -661,6 +849,92 @@ describe("paired promotion evaluation", () => {
 });
 
 describe("evolution lifecycle", () => {
+  it("builds a skill and an unseen three-fixture suite in isolated children before paired evaluation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-skill-foundry-lifecycle-"));
+    try {
+      const evidenceArtifactId = "conversation-evidence" as ArtifactId;
+      const builderSessionId = "evolution-session" as SessionId;
+      const evaluatorSessionId = "evaluation-session" as SessionId;
+      const reflection = JSON.stringify({
+        reflection: "The correction established a durable generated-config workflow.",
+        decision: "evolve",
+        lessons: [{
+          sourceIds: [evidenceArtifactId],
+          target: "skill",
+          title: "Regenerate authentication configuration",
+          guidance: "Edit config/service.toml, run tools/render-config, then ./verify-auth.",
+          relevantPaths: ["config/service.toml", "tools/render-config", "verify-auth"],
+          appliesWhen: ["Authentication configuration changes"],
+          doesNotApplyWhen: ["Documentation-only changes"],
+        }],
+      });
+      const suiteProposal = JSON.stringify({ fixtures: [
+        foundryFixture("near-transfer", "Change timeout to 45."),
+        foundryFixture("generalization", "Change lockout to 7."),
+        foundryFixture("negative-control", "Add a troubleshooting note."),
+      ] });
+      const events = new Map<SessionId, readonly SessionEvent[]>([
+        [builderSessionId, textEvents(reflection, builderSessionId, "builder-proposal" as ArtifactId)],
+        [evaluatorSessionId, textEvents(suiteProposal, evaluatorSessionId, "suite-proposal" as ArtifactId)],
+      ]);
+      const repository: SessionRepository = {
+        create: () => rejectUnexpected(),
+        get: async (id) => ({ ok: true, value: { ...fakeCompletedChildRecord(), header: { ...fakeCompletedChildRecord().header, id } } }),
+        list: () => rejectUnexpected(),
+        append: () => rejectUnexpected(),
+        read: async (id, afterSequence, limit) => ({ ok: true, value: (events.get(id) ?? []).filter((event) => event.sequence > afterSequence).slice(0, limit) }),
+        recordArtifact: () => rejectUnexpected(),
+        readArtifact: () => rejectUnexpected(),
+      };
+      const spawnChild = vi.fn<SessionService["spawnChild"]>(async (request) => ({ ok: true, value: {
+        childId: (request.role === "evolution" ? "builder-child" : "evaluator-child") as ChildId,
+        sessionId: request.role === "evolution" ? builderSessionId : evaluatorSessionId,
+        parentSessionId: request.parentSessionId,
+        spawnEventId: `${request.role}-spawn` as EventId,
+        role: request.role,
+        state: "running",
+      } }));
+      const runSkillPaired = vi.fn<BenchmarkService["runSkillPaired"]>(async (suite, _incumbent, candidate) => {
+        expect(suite.privateTasks.map((task) => task.variation)).toEqual(["near-transfer", "generalization", "negative-control"]);
+        return { ok: true, value: rejectedScorecard(candidate) };
+      });
+      const runPaired = vi.fn<BenchmarkService["runPaired"]>(() => rejectUnexpected());
+      const service = createEvolutionService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(new Map()),
+        repository,
+        sessions: fakeSessionService({ spawnChild }),
+        harnesses: fakeHarnessRepository([harness(incumbentId)]),
+        benchmarks: { ...fakeBenchmarkService(), runPaired, runSkillPaired },
+        activation: fakeActivation(),
+      });
+
+      const started = await service.start({
+        projectId,
+        sourceSessionId: "source" as SessionId,
+        goal: "Crystallize the authentication workflow when it helps future work.",
+        evidenceArtifactIds: [evidenceArtifactId],
+        allowedComponentKinds: ["skill"],
+        evaluationMode: "synthetic-skill-suite",
+        budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+      } as EvolutionRequest & { readonly evaluationMode: "synthetic-skill-suite" }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      const terminal = await waitForEvolutionTerminal(service, started.value.id);
+
+      expect(terminal.ok && terminal.value.state).toBe("rejected");
+      expect(spawnChild).toHaveBeenCalledTimes(2);
+      expect(spawnChild.mock.calls.map((call) => call[0].role)).toEqual(["evolution", "promotion-eval"]);
+      expect(spawnChild.mock.calls[0]?.[0].objective).not.toContain("negative-control");
+      expect(spawnChild.mock.calls[1]?.[0].objective).not.toContain("SKILL.md");
+      expect(runSkillPaired).toHaveBeenCalledOnce();
+      expect(runPaired).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("crystallizes grounded reflection lessons into catalog-ready skill components", async () => {
     const root = await mkdtemp(join(tmpdir(), "omega-evolution-reflection-skill-"));
     try {

@@ -61,7 +61,7 @@ Evolution and evaluation
   evolution <job-id>
   evolution-retry <job-id>
   evolution-cancel <job-id> <reason...>
-  evolution-start <project-id> <source-session-id> <goal> <wall-ms> <model-calls> <input-tokens> <output-tokens> <cost-micros> <processes> [evidence-csv] [component-kinds-csv]
+  evolution-start <project-id> <source-session-id> <goal> <wall-ms> <model-calls> <input-tokens> <output-tokens> <cost-micros> <processes> [evidence-csv] [component-kinds-csv] [development-suite|synthetic-skill-suite]
   benchmark <suite-id> <task-id> <harness-id>
   paired <suite-id> <incumbent-harness-id> <candidate-harness-id>
   scorecards <project-id> [cursor] [limit]
@@ -150,7 +150,15 @@ function createRequest(argv: readonly string[]): ClientRequest {
         maxCostUsdMicros: integer(required(argv, 8, "cost"), 0, "cost") as UsdMicros,
         maxProcessStarts: positiveInteger(required(argv, 9, "processes"), "processes"),
       };
-      return { kind: "evolution.start", requestId: id, request: { projectId: required(argv, 1, "project ID") as ProjectId, sourceSessionId: required(argv, 2, "source session ID") as SessionId, goal: required(argv, 3, "goal"), budget, evidenceArtifactIds: csv(argv[10]) as readonly ArtifactId[], allowedComponentKinds: enumValues(csv(argv[11]), COMPONENT_KINDS, "component kind") } };
+      const allowedComponentKinds = enumValues(csv(argv[11]), COMPONENT_KINDS, "component kind");
+      const requestedMode = argv[12];
+      if (requestedMode !== undefined && requestedMode !== "development-suite" && requestedMode !== "synthetic-skill-suite") {
+        throw new Error("evaluation mode must be development-suite or synthetic-skill-suite");
+      }
+      const evaluationMode = requestedMode ?? (allowedComponentKinds.length === 1 && allowedComponentKinds[0] === "skill"
+        ? "synthetic-skill-suite"
+        : "development-suite");
+      return { kind: "evolution.start", requestId: id, request: { projectId: required(argv, 1, "project ID") as ProjectId, sourceSessionId: required(argv, 2, "source session ID") as SessionId, goal: required(argv, 3, "goal"), budget, evidenceArtifactIds: csv(argv[10]) as readonly ArtifactId[], allowedComponentKinds, evaluationMode } };
     }
     case "benchmark": return { kind: "benchmark.run-task", requestId: id, suiteId: required(argv, 1, "suite ID") as BenchmarkSuiteId, taskId: required(argv, 2, "task ID") as BenchmarkTaskId, harnessId: required(argv, 3, "harness ID") as HarnessId };
     case "paired": return { kind: "benchmark.run-paired", requestId: id, suiteId: required(argv, 1, "suite ID") as BenchmarkSuiteId, incumbentId: required(argv, 2, "incumbent harness ID") as HarnessId, candidateId: required(argv, 3, "candidate harness ID") as HarnessId };

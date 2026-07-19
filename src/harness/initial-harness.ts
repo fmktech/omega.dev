@@ -14,6 +14,7 @@ import type {
 } from "../contracts/index.js";
 
 const INITIAL_MODEL_TOOLS = [
+  { name: "artifact.read", description: "Read a supplied session evidence artifact by ID with byte-range paging.", inputSchema: { type: "object", properties: { artifactId: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1 } }, required: ["artifactId"], additionalProperties: false } },
   { name: "file.read", description: "Read a UTF-8 workspace file and return content plus its SHA-256 interlock.", inputSchema: { type: "object", properties: { path: { type: "string", description: "Repository-relative POSIX path" } }, required: ["path"], additionalProperties: false } },
   { name: "file.write", description: "Create or replace a UTF-8 file. Pass the exact SHA from file.read when replacing; a stale SHA is rejected.", inputSchema: { type: "object", properties: { path: { type: "string" }, expectedSha: { type: ["string", "null"] }, content: { type: "string" } }, required: ["path", "expectedSha", "content"], additionalProperties: false } },
   { name: "process.start", description: "Start one isolated workspace process. Network defaults to none. Use process.observe to stream output and state.", inputSchema: { type: "object", properties: { executable: { type: "string" }, args: { type: "array", items: { type: "string" } }, cwd: { type: "string" }, stdin: { enum: ["pipe", "closed"] }, timeoutMs: { type: ["integer", "null"] } }, required: ["executable", "args"], additionalProperties: false } },
@@ -28,7 +29,7 @@ const INITIAL_MODEL_TOOLS = [
   { name: "knowledge.write", description: "Persist a verified project-knowledge document with provenance and compare-and-swap SHA.", inputSchema: { type: "object", properties: { document: { type: "object" }, expectedSha: { type: ["string", "null"] } }, required: ["document", "expectedSha"], additionalProperties: false } },
   { name: "marketplace.search", description: "Search locally created and vetted harness parts.", inputSchema: { type: "object", properties: { text: { type: "string" }, kinds: { type: "array", items: { type: "string" } }, states: { type: "array", items: { type: "string" } }, limit: { type: "integer", minimum: 1 } }, required: ["text", "kinds", "states", "limit"], additionalProperties: false } },
   { name: "marketplace.install", description: "Create a project-scoped candidate from a trusted local marketplace artifact.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"], additionalProperties: false } },
-  { name: "harness.evolve", description: "Start a bounded evolution job using this session's evidence.", inputSchema: { type: "object", properties: { goal: { type: "string" }, evidenceArtifactIds: { type: "array", items: { type: "string" } }, allowedComponentKinds: { type: "array", items: { type: "string" } }, budget: { type: "object" } }, required: ["goal", "evidenceArtifactIds", "allowedComponentKinds", "budget"], additionalProperties: false } },
+  { name: "harness.evolve", description: "Crystallize reusable session evidence into a bounded harness candidate. Skill-only requests independently synthesize a hidden three-fixture promotion suite.", inputSchema: { type: "object", properties: { goal: { type: "string" }, evidenceArtifactIds: { type: "array", items: { type: "string" } }, allowedComponentKinds: { type: "array", items: { type: "string" } }, budget: { type: "object" }, evaluationMode: { enum: ["development-suite", "synthetic-skill-suite"] } }, required: ["goal", "evidenceArtifactIds", "allowedComponentKinds", "budget"], additionalProperties: false } },
   { name: "harness.status", description: "Read the project's currently active harness manifest.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
 ] as const;
 
@@ -55,6 +56,7 @@ function modelRequest(){
 function toolRequest(call){
   const input=call.input||{},session=start.session,workspace=start.workspace;
   switch(call.toolName){
+    case "artifact.read":return {kind:"artifact.read",artifactId:input.artifactId,offset:Number(input.offset||0),limit:Number(input.limit||65536)};
     case "file.read":return {kind:"file.read",workspaceId:workspace.id,path:input.path};
     case "file.write":return {kind:"file.write",request:{sessionId:session.id,workspaceId:workspace.id,path:input.path,expectedSha:input.expectedSha??null,content:String(input.content??"")}};
     case "process.start":return {kind:"process.start",spec:{executable:String(input.executable??""),args:Array.isArray(input.args)?input.args.map(String):[],cwd:input.cwd||workspace.path,credentialEnvNames:Array.isArray(input.credentialEnvNames)?input.credentialEnvNames:[],stdin:input.stdin==="closed"?"closed":"pipe",timeoutMs:input.timeoutMs??null,sandbox:input.sandbox||{filesystem:"workspace-read-write",network:"none",allowedHosts:[],memoryLimitBytes:536870912,cpuTimeLimitMs:1800000,runtime:{kind:"oci",image:"omega-runner:local",expectedImageDigest:null,containerUser:"1000:1000",workspaceMountPath:"/workspace"}},harnessId:currentHarnessId,sessionId:session.id}};
@@ -69,7 +71,7 @@ function toolRequest(call){
     case "knowledge.write":return {kind:"knowledge.write",request:{...input,projectId:session.projectId}};
     case "marketplace.search":return {kind:"marketplace.search",query:input};
     case "marketplace.install":return {kind:"marketplace.install",artifactId:input.artifactId};
-    case "harness.evolve":return {kind:"harness.evolve",request:{...input,projectId:session.projectId,sourceSessionId:session.id}};
+    case "harness.evolve":{const skillOnly=Array.isArray(input.allowedComponentKinds)&&input.allowedComponentKinds.length===1&&input.allowedComponentKinds[0]==="skill";return {kind:"harness.evolve",request:{...input,evaluationMode:input.evaluationMode||(skillOnly?"synthetic-skill-suite":"development-suite"),projectId:session.projectId,sourceSessionId:session.id}}}
     case "harness.status":return {kind:"harness.status",projectId:session.projectId};
     default:return null;
   }
@@ -119,6 +121,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data",chunk=>{buffer+=chunk;for(;;){const newline=buffer.indexOf("\n");if(newline<0)return;const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);try{accept(JSON.parse(line))}catch(error){emit({kind:"runner.protocol-error",error:{kind:"protocol-error",protocol:"runner-jsonl",message:error instanceof Error?error.message:"invalid kernel JSONL",recoverable:false,callerAction:"abort"}})}}});`;
 
 const INITIAL_TOOLS: readonly { readonly name: string; readonly capabilities: readonly CapabilityKind[] }[] = [
+  { name: "artifact.read", capabilities: [] },
   { name: "file.read", capabilities: ["read-files"] },
   { name: "file.write", capabilities: ["write-files"] },
   { name: "process.start", capabilities: ["start-process"] },

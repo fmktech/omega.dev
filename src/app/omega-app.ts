@@ -29,6 +29,7 @@ import type {
   SessionRepository,
   SessionEvent,
   SessionService,
+  SkillEvalPrivateTask,
   TokenCount,
   UsdMicros,
   InternalError,
@@ -311,6 +312,7 @@ function zeroMetrics(verifierPassed: boolean, negativeInvariantsPassed: boolean,
     retries: 0,
     childSessions: 0,
     harnessUpdates: 0,
+    skillReads: 0,
   };
 }
 
@@ -322,6 +324,7 @@ async function observedBenchmark(
   negativeInvariantsPassed: boolean,
   startedAt: Timestamp,
   completedAt: Timestamp,
+  skillComponentIds: readonly ComponentId[] | null = null,
 ): Promise<Result<{ readonly route: ModelRouteSignature; readonly generationId: string | null; readonly metrics: BenchmarkMetrics }, EvolutionError>> {
   const events: SessionEvent[] = [];
   let cursor = 0;
@@ -370,6 +373,8 @@ async function observedBenchmark(
         retries: events.filter((event) => event.payload.kind === "model.failed").length,
         childSessions: events.filter((event) => event.payload.kind === "child.spawned").length,
         harnessUpdates: events.filter((event) => event.payload.kind === "harness.updated").length,
+        skillReads: events.filter((event) => event.payload.kind === "skill.loaded"
+          && (skillComponentIds === null || skillComponentIds.includes(event.payload.componentId))).length,
       },
     },
   };
@@ -498,7 +503,17 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
         if (!report.ok) return report;
         const policyObject = await options.objects.put("application/vnd.omega.policy+json", (async function* (): AsyncIterable<Uint8Array> { yield encoder.encode(JSON.stringify(options.config.policy)); })());
         if (!policyObject.ok) return policyObject;
-        const observed = await observedBenchmark(options, terminal.header.id, request.route, verifierPassed, negativeInvariantsPassed, startedAt, completedAt);
+        const skillComponentIds = (request.privateTask as Partial<SkillEvalPrivateTask>).skillComponentIds ?? null;
+        const observed = await observedBenchmark(
+          options,
+          terminal.header.id,
+          request.route,
+          verifierPassed,
+          negativeInvariantsPassed,
+          startedAt,
+          completedAt,
+          skillComponentIds,
+        );
         if (!observed.ok) return observed;
         return {
           ok: true,

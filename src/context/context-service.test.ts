@@ -48,6 +48,8 @@ describe("project context service", () => {
       "description: Prepare and verify the api-client release artifact.",
       "tags: [release, api-client]",
       "relevantPaths: [packages/api-client]",
+      'appliesWhen: ["The api-client release artifact changes, not docs"]',
+      'doesNotApplyWhen: ["The task only changes API documentation"]',
       "---",
       "",
       "# API client release",
@@ -77,6 +79,8 @@ describe("project context service", () => {
       description: "Prepare and verify the api-client release artifact.",
       tags: ["release", "api-client"],
       relevantPaths: ["packages/api-client"],
+      appliesWhen: ["The api-client release artifact changes, not docs"],
+      doesNotApplyWhen: ["The task only changes API documentation"],
     }]);
     expect(fixture.catalogQueries).toEqual([{
       projectId: fixture.projectId,

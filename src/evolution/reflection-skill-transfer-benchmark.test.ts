@@ -32,6 +32,8 @@ describe("reflection skill transfer benchmark", () => {
       description: "Regenerate authentication configuration",
       tags: ["reflection", "project-scoped"],
       relevantPaths: [],
+      appliesWhen: [],
+      doesNotApplyWhen: [],
     }]);
     const prompt = JSON.stringify(rendered);
 
@@ -163,6 +165,8 @@ describe("reflection skill transfer benchmark", () => {
           description: "Regenerate authentication configuration",
           tags: ["reflection"],
           relevantPaths: [],
+          appliesWhen: [],
+          doesNotApplyWhen: [],
         },
         markdown: "# Skill\nUse the complete workflow.",
       }],

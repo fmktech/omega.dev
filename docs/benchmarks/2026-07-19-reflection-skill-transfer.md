@@ -18,6 +18,34 @@ The benchmark therefore rejects the next proposed product step—automatic post-
 
 Durable raw record: `~/.omega/benchmarks/reflection-skill-transfer/09ca1f8159bc5f36d04edfede483728f5404ae035fef522066175f441c18cdfe.json`
 
+## Follow-up: atomic bundle and scoped retrieval
+
+The recommended compiler and runner changes were implemented and evaluated with the same three scenarios, three replicates, route-comparability rule, and downstream scorer. The new reflection prompt additionally requires repository paths and positive and negative applicability conditions; it still receives no evaluation output.
+
+The compiler now creates one immutable candidate in which a skill lesson carries every related `knowledge`, `runner`, `tool`, and `policy` lesson as explicitly labelled companion guidance. This avoids partially activating cross-destination advice while ensuring a selected skill exposes the whole evidence-supported bundle. The catalog now includes `relevantPaths`, `appliesWhen`, and `doesNotApplyWhen`. The initial runner also caches successful reads by immutable component ID for the life of the session.
+
+The follow-up result remains **mixed and is not promotion evidence**:
+
+| Measure | Before | Follow-up |
+| --- | ---: | ---: |
+| Comparable pairs | 9/9 | 9/9 |
+| Relevant retrieval | 6/6 | 6/6 |
+| Irrelevant non-retrieval | 0/3 | 2/3 |
+| Canonical source | 4/6 | 5/6 |
+| Regeneration | 4/6 | 5/6 |
+| Scoped verifier | 4/6 | 5/6 |
+| Never directly edit generated output | 4/6 | 5/6 |
+| Web-workspace boundary, frozen lexical score | 0/6 | 0/6 |
+| Relevant full passes | 0/6 | 0/6 |
+
+The raw follow-up record is `~/.omega/benchmarks/reflection-skill-transfer/e4c6aca33c3548d4703ccc9b3617843ab74a2611f6ea9fb4a6b818120f87c149.json`.
+
+The new reflection scored **9/10** and produced a project fact plus a scoped auth workflow. Both were preserved in the installed skill bundle. Five of six relevant candidate outputs applied the source/regenerate/verify/no-direct-edit sequence. The sixth retrieved the correct skill but returned no final text. Two of three documentation-only runs correctly avoided retrieval.
+
+The frozen scorer also exposed a measurement limitation that was not changed after seeing results: candidate plans used wording such as “do not run npm test or touch any files in the web/ workspace,” while the positive concept matcher accepted only a small set of different phrases. Separately, its forbidden-claim matcher treats a negated phrase such as “do not run npm test” as if it recommended `npm test`. These runs therefore remain strict failures, but the raw responses must be consulted before concluding that the boundary was absent. A future benchmark version should freeze a negation-aware semantic judge before collecting a new series; these v1 results must not be rescored in place.
+
+Follow-up provider usage was $0.000452 for reflection, $0.002054 for incumbent runs, and $0.002278 for candidate runs: **$0.004784 total**. The nine pairs used the same OpenRouter model and GMICloud serving provider. Three incumbent and two candidate transient retries were recorded without exhausting the bound.
+
 ## Method
 
 One fresh DeepSeek V4 Flash reflection saw only the frozen completed developer conversation about generated authentication configuration. Its proposal was compiled through the production `createReflectionSkillCandidate` path into an immutable project-scoped harness child.

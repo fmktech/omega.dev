@@ -65,7 +65,7 @@ export async function createReflectionSkillCandidate(
     }
     const replaceIndex = matchingIndexes[0] ?? -1;
     const replaced = replaceIndex < 0 ? null : components[replaceIndex] ?? null;
-    const semanticSha = skillSemanticSha(item.name, item.lesson.title, item.lesson.guidance);
+    const semanticSha = skillSemanticSha(item.name, input.proposal);
     if (replaced !== null) {
       const installed = await readText(objects, replaced.objectHash);
       if (!installed.ok) return installed;
@@ -75,7 +75,7 @@ export async function createReflectionSkillCandidate(
       name: item.name,
       title: item.lesson.title,
       guidance: item.lesson.guidance,
-      sourceIds: item.lesson.sourceIds,
+      lessons: input.proposal.lessons,
       sourceSessionId: input.sourceSessionId,
       evidenceArtifactIds: input.evidenceArtifactIds,
       proposalArtifactId: input.proposalArtifactId,
@@ -142,6 +142,9 @@ function reflectionEvidenceSha(input: ReflectionSkillCandidateInput): Sha256 {
       target: lesson.target,
       title: lesson.title,
       guidance: lesson.guidance,
+      relevantPaths: normalizedStrings(lesson.relevantPaths),
+      appliesWhen: normalizedStrings(lesson.appliesWhen),
+      doesNotApplyWhen: normalizedStrings(lesson.doesNotApplyWhen),
     })),
   };
   return hash(canonical(value)) as Sha256;
@@ -151,7 +154,7 @@ function renderSkillMarkdown(input: {
   readonly name: string;
   readonly title: string;
   readonly guidance: string;
-  readonly sourceIds: readonly string[];
+  readonly lessons: ReflectionProposal["lessons"];
   readonly sourceSessionId: SessionId;
   readonly evidenceArtifactIds: readonly ArtifactId[];
   readonly proposalArtifactId: ArtifactId;
@@ -159,11 +162,14 @@ function renderSkillMarkdown(input: {
   readonly semanticSha: Sha256;
 }): string {
   const title = singleLine(input.title);
+  const relevantPaths = unique(input.lessons.flatMap((lesson) => normalizedPaths(lesson.relevantPaths)));
+  const appliesWhen = unique(input.lessons.flatMap((lesson) => normalizedStrings(lesson.appliesWhen)));
+  const doesNotApplyWhen = unique(input.lessons.flatMap((lesson) => normalizedStrings(lesson.doesNotApplyWhen)));
   const provenance = JSON.stringify({
     sourceSessionId: input.sourceSessionId,
     evidenceArtifactIds: [...new Set(input.evidenceArtifactIds)].sort(),
     proposalArtifactId: input.proposalArtifactId,
-    sourceIds: [...new Set(input.sourceIds)].sort(),
+    sourceIds: [...new Set(input.lessons.flatMap((lesson) => lesson.sourceIds))].sort(),
     evidenceSha: input.evidenceSha,
   }, null, 2);
   return [
@@ -171,7 +177,9 @@ function renderSkillMarkdown(input: {
     `name: ${input.name}`,
     `description: ${frontmatterScalar(title)}`,
     "tags: [reflection, project-scoped, self-improvement]",
-    "relevantPaths: []",
+    `relevantPaths: [${relevantPaths.join(", ")}]`,
+    `appliesWhen: ${JSON.stringify(appliesWhen)}`,
+    `doesNotApplyWhen: ${JSON.stringify(doesNotApplyWhen)}`,
     `sourceSessionId: ${input.sourceSessionId}`,
     `evidenceSha: ${input.evidenceSha}`,
     `semanticSha: ${input.semanticSha}`,
@@ -179,7 +187,17 @@ function renderSkillMarkdown(input: {
     "",
     `# ${title}`,
     "",
+    "## Skill guidance",
+    "",
     input.guidance.trim(),
+    ...input.lessons.filter((lesson) => lesson.target !== "skill").flatMap((lesson) => [
+      "",
+      `## Companion ${lesson.target}`,
+      "",
+      `### ${singleLine(lesson.title)}`,
+      "",
+      lesson.guidance.trim(),
+    ]),
     "",
     "## Provenance",
     "",
@@ -192,8 +210,32 @@ function renderSkillMarkdown(input: {
   ].join("\n");
 }
 
-function skillSemanticSha(name: string, title: string, guidance: string): Sha256 {
-  return hash(canonical({ name, title: singleLine(title), guidance: guidance.trim() })) as Sha256;
+function skillSemanticSha(name: string, proposal: ReflectionProposal): Sha256 {
+  return hash(canonical({
+    name,
+    lessons: proposal.lessons.map((lesson) => ({
+      target: lesson.target,
+      title: singleLine(lesson.title),
+      guidance: lesson.guidance.trim(),
+      relevantPaths: normalizedPaths(lesson.relevantPaths),
+      appliesWhen: normalizedStrings(lesson.appliesWhen),
+      doesNotApplyWhen: normalizedStrings(lesson.doesNotApplyWhen),
+    })),
+  })) as Sha256;
+}
+
+function normalizedPaths(values: readonly string[] | undefined): string[] {
+  return normalizedStrings(values).filter((path) => path === "." || (
+    !path.startsWith("/") && !path.includes("\\") && path.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+  ));
+}
+
+function normalizedStrings(values: readonly string[] | undefined): string[] {
+  return unique((values ?? []).map((value) => value.trim()).filter((value) => value.length > 0));
+}
+
+function unique<T>(values: readonly T[]): T[] {
+  return [...new Set(values)];
 }
 
 function skillName(title: string, guidance: string): string {

@@ -29,6 +29,7 @@ const MAX_SKILL_NAME_CHARS = 120;
 const MAX_SKILL_DESCRIPTION_CHARS = 500;
 const MAX_SKILL_TAGS = 32;
 const MAX_SKILL_PATHS = 64;
+const MAX_SKILL_APPLICABILITY_ITEMS = 32;
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   ".git", ".hg", ".svn", ".omega", ".next", ".turbo", "build", "coverage", "dist", "node_modules", "vendor",
 ]);
@@ -166,7 +167,10 @@ function skillCatalogEntry(component: ComponentManifest, markdown: string): Resu
   }
   const tags = array(frontmatter.value, "tags");
   const relevantPaths = array(frontmatter.value, "relevantPaths");
-  if (tags.length > MAX_SKILL_TAGS || relevantPaths.length > MAX_SKILL_PATHS) {
+  const appliesWhen = array(frontmatter.value, "appliesWhen");
+  const doesNotApplyWhen = array(frontmatter.value, "doesNotApplyWhen");
+  if (tags.length > MAX_SKILL_TAGS || relevantPaths.length > MAX_SKILL_PATHS
+    || appliesWhen.length > MAX_SKILL_APPLICABILITY_ITEMS || doesNotApplyWhen.length > MAX_SKILL_APPLICABILITY_ITEMS) {
     return validation("Skill catalog metadata exceeds its item bounds", "skill.frontmatter");
   }
   if (relevantPaths.some((path) => !isRelativePath(path))) {
@@ -180,6 +184,8 @@ function skillCatalogEntry(component: ComponentManifest, markdown: string): Resu
       description: description.trim(),
       tags: unique(tags),
       relevantPaths: unique(relevantPaths) as readonly RelativePath[],
+      appliesWhen: unique(appliesWhen),
+      doesNotApplyWhen: unique(doesNotApplyWhen),
     },
   };
 }
@@ -217,6 +223,12 @@ function parseSkillFrontmatter(markdown: string): Result<SkillFrontmatter, Conte
 
 function parseInline(value: string): string | readonly string[] {
   if (value.startsWith("[") && value.endsWith("]")) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
+    } catch {
+      // YAML flow arrays may use unquoted simple scalars; parse those below.
+    }
     const body = value.slice(1, -1).trim();
     return body.length === 0 ? [] : body.split(",").map((item) => unquote(item.trim()));
   }

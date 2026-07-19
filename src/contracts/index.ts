@@ -866,6 +866,8 @@ export type SkillCatalogEntry = {
   readonly description: string;
   readonly tags: readonly string[];
   readonly relevantPaths: readonly RelativePath[];
+  readonly appliesWhen: readonly string[];
+  readonly doesNotApplyWhen: readonly string[];
 };
 
 export type SkillDocument = {

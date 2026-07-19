@@ -10,6 +10,8 @@ export type ReflectionProposal = {
 const TARGETS: ReadonlySet<string> = new Set(["knowledge", "skill", "runner", "tool", "policy"]);
 const MAX_LESSONS = 4;
 const MAX_GUIDANCE_CHARS = 1_600;
+const MAX_SCOPE_ITEMS = 24;
+const MAX_SCOPE_ITEM_CHARS = 240;
 
 export function parseReflectionProposal(text: string, allowedSourceIds: readonly string[]): Result<ReflectionProposal, EvolutionError> {
   let parsed: unknown;
@@ -47,14 +49,43 @@ export function parseReflectionProposal(text: string, allowedSourceIds: readonly
     if (title.length === 0 || title.length > 120 || guidance.length === 0 || guidance.length > MAX_GUIDANCE_CHARS) {
       return validation("Reflection lesson title or guidance is empty or over limit.", `modelOutput.lessons.${index}`);
     }
+    const relevantPaths = stringList(value["relevantPaths"], `modelOutput.lessons.${index}.relevantPaths`);
+    if (!relevantPaths.ok) return relevantPaths;
+    if (relevantPaths.value.some((path) => !isRelativePath(path))) {
+      return validation("Reflection lesson relevantPaths must be repository-relative POSIX paths.", `modelOutput.lessons.${index}.relevantPaths`);
+    }
+    const appliesWhen = stringList(value["appliesWhen"], `modelOutput.lessons.${index}.appliesWhen`);
+    if (!appliesWhen.ok) return appliesWhen;
+    const doesNotApplyWhen = stringList(value["doesNotApplyWhen"], `modelOutput.lessons.${index}.doesNotApplyWhen`);
+    if (!doesNotApplyWhen.ok) return doesNotApplyWhen;
     lessons.push({
       sourceIds: [...new Set(sourceIds as string[])].sort(),
       target: value["target"] as LearningTarget,
       title,
       guidance,
+      relevantPaths: relevantPaths.value,
+      appliesWhen: appliesWhen.value,
+      doesNotApplyWhen: doesNotApplyWhen.value,
     });
   }
   return { ok: true, value: { reflection, decision: parsed["decision"], lessons } };
+}
+
+function stringList(value: unknown, field: string): Result<readonly string[], EvolutionError> {
+  if (value === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(value) || value.length > MAX_SCOPE_ITEMS || value.some((item) => typeof item !== "string")) {
+    return validation("Reflection lesson scope metadata must be a bounded string array.", field);
+  }
+  const normalized = [...new Set((value as string[]).map((item) => item.trim()))];
+  if (normalized.some((item) => item.length === 0 || item.length > MAX_SCOPE_ITEM_CHARS)) {
+    return validation("Reflection lesson scope metadata contains an empty or over-limit item.", field);
+  }
+  return { ok: true, value: normalized };
+}
+
+function isRelativePath(path: string): boolean {
+  return path === "." || (!path.startsWith("/") && !path.includes("\\")
+    && path.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."));
 }
 
 function jsonObjects(source: string): readonly string[] {

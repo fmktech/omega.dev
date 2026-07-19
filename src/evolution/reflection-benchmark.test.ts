@@ -39,6 +39,8 @@ describe("reflection component benchmark", () => {
     expect(rendered.value.prompt).toContain('"role":"tool"');
     expect(rendered.value.prompt).not.toContain("requiredSourceIds");
     expect(rendered.value.prompt).not.toContain("forbiddenClaims");
+    expect(rendered.value.prompt).toContain("relevantPaths");
+    expect(rendered.value.prompt).toContain("doesNotApplyWhen");
     expect(rendered.value.evidenceSha).toMatch(/^[a-f0-9]{64}$/u);
   });
 
@@ -110,6 +112,33 @@ describe("reflection component benchmark", () => {
     };
 
     expect(scoreReflection(selected, proposal).points).toBe(10);
+  });
+
+  it("preserves project paths and positive and negative applicability from reflection output", () => {
+    const parsed = parseReflectionProposal(JSON.stringify({
+      reflection: "A scoped generated-config procedure was established.",
+      decision: "evolve",
+      lessons: [{
+        sourceIds: ["t04", "t06"],
+        target: "skill",
+        title: "Regenerate authentication configuration",
+        guidance: "Edit the source and regenerate.",
+        relevantPaths: ["config/service.toml", "runtime/defaults.json"],
+        appliesWhen: ["Authentication runtime configuration changes"],
+        doesNotApplyWhen: ["The task is documentation-only"],
+      }],
+    }), scenario("generated-config-correction").turns.map((turn) => turn.id));
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        lessons: [{
+          relevantPaths: ["config/service.toml", "runtime/defaults.json"],
+          appliesWhen: ["Authentication runtime configuration changes"],
+          doesNotApplyWhen: ["The task is documentation-only"],
+        }],
+      },
+    });
   });
 
   it.each([

@@ -34,6 +34,7 @@ const INITIAL_MODEL_TOOLS = [
 
 const INITIAL_RUNNER = String.raw`let buffer="",start=null,currentHarnessId=null,requestSequence=0,activeStream=null,toolCalls=new Map();
 const pending=new Map();
+const skillCache=new Map();
 const tools=${JSON.stringify(INITIAL_MODEL_TOOLS)};
 let messages=[];
 function emit(message){process.stdout.write(JSON.stringify({protocol:"omega-runner-jsonl",version:1,message})+"\n")}
@@ -77,7 +78,9 @@ function runTools(calls,index=0,results=[]){
   if(index>=calls.length){messages.push({role:"assistant",content:calls});messages.push({role:"tool",content:results});modelRequest();return}
   const call=calls[index],mapped=toolRequest(call);
   if(!mapped){results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result:{error:"unsupported tool"},isError:true});runTools(calls,index+1,results);return}
-  request(mapped,reply=>{results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result:reply.result??reply,isError:reply.result?.ok===false||reply.kind==="request.rejected"});runTools(calls,index+1,results)});
+  const skillKey=call.toolName==="skill.read"&&typeof call.input?.componentId==="string"?call.input.componentId:null;
+  if(skillKey!==null&&skillCache.has(skillKey)){results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result:skillCache.get(skillKey),isError:false});runTools(calls,index+1,results);return}
+  request(mapped,reply=>{const result=reply.result??reply,isError=reply.result?.ok===false||reply.kind==="request.rejected";if(skillKey!==null&&!isError)skillCache.set(skillKey,result);results.push({kind:"tool-result",callId:call.callId,toolName:call.toolName,result,isError});runTools(calls,index+1,results)});
 }
 function modelEvent(event){
   if(event.kind==="tool-call")toolCalls.set(event.call.callId,event.call);

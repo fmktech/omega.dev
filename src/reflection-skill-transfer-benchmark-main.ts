@@ -243,8 +243,10 @@ async function loadInstalledSkills(
         componentId: component.id,
         name,
         description,
-        tags: ["reflection", "project-scoped", "self-improvement"],
-        relevantPaths: [],
+        tags: frontmatterArray(markdown.value, "tags"),
+        relevantPaths: frontmatterArray(markdown.value, "relevantPaths") as import("./contracts/index.js").RelativePath[],
+        appliesWhen: frontmatterArray(markdown.value, "appliesWhen"),
+        doesNotApplyWhen: frontmatterArray(markdown.value, "doesNotApplyWhen"),
       },
       markdown: markdown.value,
     });
@@ -265,6 +267,19 @@ function frontmatter(markdown: string, field: string): string | null {
   if (match?.[1] === undefined) return null;
   const value = match[1].trim();
   return value.startsWith("\"") && value.endsWith("\"") ? value.slice(1, -1) : value;
+}
+
+function frontmatterArray(markdown: string, field: string): string[] {
+  const raw = frontmatter(markdown, field);
+  if (raw === null || !raw.startsWith("[") || !raw.endsWith("]")) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  } catch {
+    // Simple YAML flow arrays may omit quotes.
+  }
+  const body = raw.slice(1, -1).trim();
+  return body.length === 0 ? [] : body.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function scenario(id: string) {

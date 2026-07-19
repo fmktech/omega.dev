@@ -121,7 +121,7 @@ function evolutionObjective(request: EvolutionRequest): string {
   ];
   if (request.allowedComponentKinds.includes("skill")) {
     instructions.push(
-      "When the evidence is a completed project conversation, reflect before mutating. If it establishes a repeatable procedure, you may return the reflection JSON shape below instead of a component delta; the daemon will compile each skill lesson into a canonical SKILL.md. Choose no-change when the behavior was temporary or unsupported.",
+      "When the evidence is a completed project conversation, reflect before mutating. If it establishes a repeatable procedure, you may return the reflection JSON shape below instead of a component delta; the daemon will atomically compile each skill lesson together with every related knowledge, runner, tool, and policy lesson into a canonical project skill bundle. Choose no-change when the behavior was temporary or unsupported.",
       JSON.stringify({
         reflection: "short evidence-grounded synthesis",
         decision: "evolve",
@@ -130,10 +130,13 @@ function evolutionObjective(request: EvolutionRequest): string {
           target: "skill",
           title: "short skill title",
           guidance: "complete repeatable project procedure",
+          relevantPaths: ["project/relative/path"],
+          appliesWhen: ["specific triggering task condition"],
+          doesNotApplyWhen: ["specific adjacent task that must not trigger it"],
         }],
       }),
       `Reflection sourceIds must cite only these supplied evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
-      "A reflection may contain lessons for other targets, but this skill-scoped mutation compiles only target=skill lessons.",
+      "Include every related destination supported by the same evidence. The skill-scoped compiler preserves them in one candidate and exposes companion lessons only when the skill is selected.",
     );
   }
   return instructions.join("\n\n");

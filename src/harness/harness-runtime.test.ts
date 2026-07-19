@@ -132,6 +132,87 @@ describe("harness runtime", () => {
     child.kill("SIGTERM");
   });
 
+  it("serves repeated immutable skill reads from the session cache", async () => {
+    const fixture = await repositoryFixture("skill-read-cache");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    send({ kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) });
+    await lines.next();
+    const bootstrap = await lines.next();
+    const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+      instructions: [],
+      knowledgeCatalog: [],
+      skillCatalog: [{
+        componentId: "component_verify",
+        name: "verify-project",
+        description: "Run the scoped verifier",
+        tags: ["verify"],
+        relevantPaths: ["src"],
+        appliesWhen: ["Source changes"],
+        doesNotApplyWhen: ["Documentation-only changes"],
+      }],
+    } } } });
+    const firstModel = await lines.next();
+    const firstModelId = ((firstModel["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    const route = modelRoute();
+    send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: firstModelId, result: { ok: true, value: { streamId: "stream-skill-cache", route } } } });
+    send({
+      kind: "kernel.event",
+      event: {
+        kind: "model.event",
+        event: {
+          kind: "completed",
+          completion: {
+            ...modelCompletion(route),
+            streamId: "stream-skill-cache",
+            content: [
+              { kind: "tool-call", callId: "read-one", toolName: "skill.read", input: { componentId: "component_verify" } },
+              { kind: "tool-call", callId: "read-two", toolName: "skill.read", input: { componentId: "component_verify" } },
+            ],
+          },
+        },
+      },
+    });
+    const skillRead = await lines.next();
+    expect(skillRead).toMatchObject({ message: { request: { kind: "skill.read", componentId: "component_verify" } } });
+    const skillReadId = ((skillRead["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "skill.read", requestId: skillReadId, result: { ok: true, value: {
+      componentId: "component_verify",
+      objectHash: "b".repeat(64),
+      catalog: {
+        componentId: "component_verify",
+        name: "verify-project",
+        description: "Run the scoped verifier",
+        tags: ["verify"],
+        relevantPaths: ["src"],
+        appliesWhen: ["Source changes"],
+        doesNotApplyWhen: ["Documentation-only changes"],
+      },
+      markdown: "# Verify project\n\nRun ./verify.\n",
+    } } } });
+
+    const next = await lines.next();
+    expect(next).toMatchObject({ message: { request: { kind: "model.start" } } });
+    const nextModelRequest = ((next["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+    const messages = nextModelRequest["messages"] as readonly JsonObject[];
+    const toolMessage = messages.at(-1);
+    expect(toolMessage).toMatchObject({ role: "tool", content: [
+      expect.objectContaining({ callId: "read-one", isError: false }),
+      expect.objectContaining({ callId: "read-two", isError: false }),
+    ] });
+    child.kill("SIGTERM");
+  });
+
   it("materializes a deterministic mini-swe baseline without activating it", async () => {
     const fixture = await repositoryFixture("mini-baseline");
     const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);

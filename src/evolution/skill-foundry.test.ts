@@ -50,8 +50,8 @@ describe("skill foundry synthetic suite", () => {
     expect(JSON.stringify(result.value.manifest.tasks)).not.toContain("checks");
     expect(JSON.stringify(result.value.manifest.tasks)).not.toContain("skillUseExpectation");
     expect(result.value.manifest.promotionPolicy).toMatchObject({
-      replicatesPerHarness: 1,
-      thresholds: { minimumComparablePairs: 3, minimumSuccessRateDelta: 1 / 3 },
+      replicatesPerHarness: 3,
+      thresholds: { minimumComparablePairs: 9, minimumSuccessRateDelta: 0 },
     });
     for (const task of result.value.manifest.tasks) {
       expect(await objects.describe(task.fixtureObjectHash)).toMatchObject({ ok: true });

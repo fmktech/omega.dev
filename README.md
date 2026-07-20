@@ -82,6 +82,7 @@ That runs strict typechecking, the production build, all unit/integration tests,
 Architecture decisions live in [`docs/adrs`](docs/adrs/README.md), and the runtime integration contract is in [`docs/implementation/runtime-contract.md`](docs/implementation/runtime-contract.md).
 The first completed live evolution run is recorded in [`docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md`](docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md).
 The native reflection-to-skill retrieval benchmark is recorded in [`docs/benchmarks/2026-07-19-reflection-skill-transfer.md`](docs/benchmarks/2026-07-19-reflection-skill-transfer.md).
+The production-shaped workspace transfer benchmark is recorded in [`docs/benchmarks/2026-07-19-workspace-skill-transfer.md`](docs/benchmarks/2026-07-19-workspace-skill-transfer.md).
 
 ## License
 

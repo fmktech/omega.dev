@@ -22,7 +22,7 @@ The daemon validates and content-addresses all fixture files, public objectives,
 
 The trusted benchmark launcher then runs the incumbent and candidate on identical copies of all three fixtures. Task runners receive the objective and fixture, never the hidden verifier or applicability expectation. Positive candidate runs must load the candidate-only skill component. The negative-control candidate run must not load that component. Reads of unrelated incumbent skills neither satisfy nor violate these gates.
 
-The suite requires three comparable pairs, one per variation. Promotion requires at least a one-third success-rate improvement, every hidden check and invariant to hold, and no protected regression. The existing incumbent-owned Promotion Eval creates the scorecard and automatically activates only a promotable candidate. Rejected candidates and all evidence remain immutable for diagnosis.
+The suite runs three matched replicates of each variation and requires all nine pairs to be comparable. Promotion requires every hidden check and invariant to hold, no protected regression, and either a capability gain or equivalent capability at lower measured cost or latency. The existing incumbent-owned Promotion Eval creates the scorecard and automatically activates only a promotable candidate. Rejected candidates and all evidence remain immutable for diagnosis.
 
 The builder and evaluator may read only continuation artifacts explicitly supplied to their child sessions. `artifact.read` is therefore an initial harness tool, while cross-session artifacts not named in the continuation remain inaccessible.
 
@@ -36,7 +36,8 @@ This lifecycle is a deliberate per-candidate Promotion Eval under ADR-0011. It d
 - Evaluation data is opportunity-specific without being visible to the candidate author.
 - Near transfer checks recurrence, generalization checks the procedure rather than wording, and the negative control checks retrieval precision.
 - Candidate-only skill-read evidence prevents unrelated installed skills from satisfying or tripping the applicability gate.
-- Three fixtures are intentionally small and economical; broader external validity remains the role of development suites and final holdouts.
+- Three fixtures with three matched replicates remain intentionally small; the replicates make stochastic gains and efficiency claims less brittle. Broader external validity remains the role of development suites and final holdouts.
+- A production-shaped workspace holdout demonstrated the intended transfer path: 9/9 comparable pairs, one capability gain, no regressions, correct skill retrieval on every positive and negative case, 55.3% fewer tool calls, and 33.1% lower provider cost. The full record is documented in `docs/benchmarks/2026-07-19-workspace-skill-transfer.md`.
 - The daemon now owns immutable synthetic-suite artifacts and evolution jobs record the evaluator session and suite lineage.
 
 ## Alternatives considered

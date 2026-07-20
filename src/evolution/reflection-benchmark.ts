@@ -373,7 +373,7 @@ export function renderReflectionPrompt(scenario: ReflectionScenario): Result<{ r
     "User corrections and later observed outcomes override earlier assistant assumptions or passing but stale checks.",
     "Choose no-change for temporary, explicitly non-generalizable, or unsupported behavior. Otherwise choose evolve and cite the transcript turn IDs that directly support each lesson.",
     "Targets: knowledge for a project fact, skill for a repeatable procedure, runner for an always-on decision rule, tool for a missing executable capability, or policy for a safety boundary.",
-    "For every lesson, provide narrow repository-relative relevantPaths plus concrete appliesWhen and doesNotApplyWhen conditions. Use an empty array only when the evidence cannot support that field.",
+    "For every lesson, provide narrow repository-relative relevantPaths plus concrete appliesWhen and doesNotApplyWhen conditions. Paths may be `.` or concrete forward-slash paths; never use absolute paths, backslashes, globs, or placeholder angle brackets. Use an empty array only when the evidence cannot support that field.",
     "Return exactly one JSON object and no prose or code fence. lessons must be empty for no-change and contain 1-4 items for evolve.",
     JSON.stringify({
       reflection: "short evidence-grounded synthesis",

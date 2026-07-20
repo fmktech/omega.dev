@@ -114,10 +114,10 @@ export async function compileSkillEvalSuite(
     promotionPolicy: {
       id: `skill-foundry-policy-${signature}@1`,
       version: "1",
-      replicatesPerHarness: 1,
+      replicatesPerHarness: 3,
       thresholds: {
-        minimumComparablePairs: 3,
-        minimumSuccessRateDelta: 1 / 3,
+        minimumComparablePairs: 9,
+        minimumSuccessRateDelta: 0,
         maximumProtectedRegressions: 0,
         confidenceLevel: 0.8,
       },

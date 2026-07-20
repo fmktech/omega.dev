@@ -83,6 +83,7 @@ Architecture decisions live in [`docs/adrs`](docs/adrs/README.md), and the runti
 The first completed live evolution run is recorded in [`docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md`](docs/benchmarks/2026-07-17-deepseek-v4-flash-evolution.md).
 The native reflection-to-skill retrieval benchmark is recorded in [`docs/benchmarks/2026-07-19-reflection-skill-transfer.md`](docs/benchmarks/2026-07-19-reflection-skill-transfer.md).
 The production-shaped workspace transfer benchmark is recorded in [`docs/benchmarks/2026-07-19-workspace-skill-transfer.md`](docs/benchmarks/2026-07-19-workspace-skill-transfer.md).
+The second no-selection continual-workstream result is recorded in [`docs/benchmarks/2026-07-20-continual-workstream-rerun.md`](docs/benchmarks/2026-07-20-continual-workstream-rerun.md).
 
 ## License
 

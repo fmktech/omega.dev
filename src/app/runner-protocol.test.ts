@@ -106,7 +106,17 @@ describe("runner protocol dispatcher", () => {
     const persisted: PersistedEventPayload[] = [];
     const live: LiveEventEnvelope[] = [];
     const artifacts: ArtifactId[] = [];
-    const record = sessionRecord();
+    const baseRecord = sessionRecord();
+    const record: SessionRecord = {
+      ...baseRecord,
+      header: {
+        ...baseRecord.header,
+        capabilityEnvelope: {
+          ...baseRecord.header.capabilityEnvelope,
+          createdAt: new Date().toISOString() as Timestamp,
+        },
+      },
+    };
     const context = {
       runners: runner,
       models: {
@@ -125,6 +135,7 @@ describe("runner protocol dispatcher", () => {
       },
       sessionRepository: {
         async get() { return { ok: true, value: record }; },
+        async read() { return { ok: true, value: [] }; },
         async recordArtifact(artifact: { readonly id: ArtifactId }) { artifacts.push(artifact.id); return { ok: true, value: artifact }; },
       },
       sessions: {
@@ -146,6 +157,126 @@ describe("runner protocol dispatcher", () => {
     expect(persisted.map((event) => event.kind)).toEqual(expect.arrayContaining(["model.started", "artifact.recorded", "model.completed", "runner.stopped"]));
     expect(artifacts).toHaveLength(1);
     expect(live.filter((event) => event.kind === "model-delta")).toHaveLength(2);
+  });
+
+  it("rejects a model request after the durable session call budget is exhausted", async () => {
+    const route = modelRoute();
+    const request = runnerRequest({ kind: "model.start", requestId: "request-over-budget" as RequestId, request: {
+      sessionId: SESSION_ID,
+      harnessId: HARNESS_ID,
+      role: "main-coder",
+      messages: [{ role: "user", content: [{ kind: "text", text: "one more turn" }] }],
+      tools: [],
+      maxOutputTokens: 100 as TokenCount,
+      abortAfterMs: 1_000 as DurationMs,
+    } });
+    const sent: KernelToRunnerEnvelope[] = [];
+    const persisted: PersistedEventPayload[] = [];
+    let providerStarts = 0;
+    const base = sessionRecord();
+    const record: SessionRecord = {
+      ...base,
+      header: {
+        ...base.header,
+        capabilityEnvelope: { ...base.header.capabilityEnvelope, maxModelCalls: 1 },
+      },
+    };
+    const prior = event({ kind: "model.started", streamId: "stream-prior" as ModelStreamId, route });
+    const context = {
+      runners: staticRunner([request], sent),
+      sessionRepository: {
+        async get() { return { ok: true, value: record }; },
+        async read() { return { ok: true, value: [prior] }; },
+      },
+      models: {
+        async stream() {
+          providerStarts += 1;
+          return {
+            ok: true,
+            value: {
+              id: "stream-unexpected" as ModelStreamId,
+              route,
+              events: (async function* (): AsyncIterable<ModelStreamEvent> { return; })(),
+              async cancel() { return; },
+            },
+          } as const;
+        },
+      },
+      sessions: {
+        async recordRunnerEvent(_sessionId: SessionId, payload: PersistedEventPayload) {
+          persisted.push(payload);
+          return { ok: true, value: event(payload) };
+        },
+      },
+    } as unknown as OmegaContext;
+
+    createRunnerProtocolDispatcher(() => context).start(SESSION_ID);
+    await waitFor(() => sent.some(isReplyEnvelope));
+
+    const reply = sent.find(isReplyEnvelope)?.message.reply;
+    expect(reply).toMatchObject({
+      kind: "model.started",
+      result: { ok: false, error: { kind: "budget-exceeded", budget: "model-calls", limit: 1, observed: 2 } },
+    });
+    expect(providerStarts).toBe(0);
+    expect(persisted).toContainEqual(expect.objectContaining({ kind: "model.failed" }));
+  });
+
+  it("rejects model work after the cumulative session wall-time budget and never invokes the provider", async () => {
+    const request = runnerRequest({ kind: "model.start", requestId: "request-wall-time" as RequestId, request: {
+      sessionId: SESSION_ID,
+      harnessId: HARNESS_ID,
+      role: "main-coder",
+      messages: [{ role: "user", content: [{ kind: "text", text: "too late" }] }],
+      tools: [],
+      maxOutputTokens: 100 as TokenCount,
+      abortAfterMs: 30_000 as DurationMs,
+    } });
+    const sent: KernelToRunnerEnvelope[] = [];
+    const persisted: PersistedEventPayload[] = [];
+    let providerStarts = 0;
+    const base = sessionRecord();
+    const record: SessionRecord = {
+      ...base,
+      header: {
+        ...base.header,
+        capabilityEnvelope: {
+          ...base.header.capabilityEnvelope,
+          createdAt: new Date(Date.now() - 2_000).toISOString() as Timestamp,
+          wallTimeMs: 1_000 as DurationMs,
+        },
+      },
+    };
+    const context = {
+      runners: staticRunner([request], sent),
+      sessionRepository: {
+        async get() { return { ok: true, value: record }; },
+        async read() { return { ok: true, value: [] }; },
+      },
+      models: {
+        async stream() {
+          providerStarts += 1;
+          throw new Error("provider must not start after the session deadline");
+        },
+      },
+      sessions: {
+        async recordRunnerEvent(_sessionId: SessionId, payload: PersistedEventPayload) {
+          persisted.push(payload);
+          return { ok: true, value: event(payload) };
+        },
+      },
+    } as unknown as OmegaContext;
+
+    createRunnerProtocolDispatcher(() => context).start(SESSION_ID);
+    await waitFor(() => sent.some(isReplyEnvelope));
+
+    const reply = sent.find(isReplyEnvelope)?.message.reply;
+    expect(reply).toMatchObject({
+      kind: "model.started",
+      result: { ok: false, error: { kind: "budget-exceeded", budget: "wall-time", limit: 1_000 } },
+    });
+    expect(providerStarts).toBe(0);
+    expect(persisted).toContainEqual(expect.objectContaining({ kind: "model.failed" }));
   });
 
   it("rejects cross-session and cross-workspace requests at the dispatcher boundary", async () => {

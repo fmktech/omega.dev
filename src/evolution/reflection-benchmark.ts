@@ -83,10 +83,54 @@ export type ReflectionRun = {
   readonly usage: ModelUsage;
 };
 
+export type ReflectionRetry = {
+  readonly failedAttempt: number;
+  readonly reason: "provider" | "model-output";
+  readonly error: EvolutionError;
+};
+
+export type RetriedReflectionRun = {
+  readonly run: ReflectionRun;
+  readonly attempts: number;
+  readonly retries: readonly ReflectionRetry[];
+};
+
+export type ReflectionRetryOptions = {
+  readonly maxAttempts?: number;
+  readonly waitBeforeRetry?: (delayMs: number) => Promise<void>;
+  readonly onRetry?: (retry: ReflectionRetry, nextAttempt: number, maxAttempts: number) => void;
+};
+
 const MAX_TURNS = 24;
 const MAX_TURN_CHARS = 4_000;
 
 export const REFLECTION_SCENARIOS: readonly ReflectionScenario[] = [
+  {
+    id: "macos-timeout-command-correction",
+    title: "User corrects a GNU command name on a macOS development host",
+    projectContext: "A service repository used from a macOS ARM64 developer host with GNU coreutils installed under prefixed command names.",
+    turns: [
+      { id: "t01", role: "user", content: "Run ./verify-auth with a 10-second deadline on this development Mac." },
+      { id: "t02", role: "assistant", content: "I will run timeout 10 ./verify-auth." },
+      { id: "t03", role: "tool", content: "zsh: command not found: timeout" },
+      { id: "t04", role: "user", content: "This host is macOS. GNU coreutils is installed with prefixed names, so use gtimeout 10 ./verify-auth here. Plain timeout is the Linux command. Do not apply this workaround inside Linux containers." },
+      { id: "t05", role: "assistant", content: "I reran the verifier with gtimeout 10 ./verify-auth." },
+      { id: "t06", role: "tool", content: "authentication verification passed" },
+      { id: "t07", role: "user", content: "Correct. Internalize this host-scoped command correction so I do not need to repeat it on the next project task." },
+    ],
+    rubric: {
+      decision: "evolve",
+      target: "skill",
+      requiredSourceIds: ["t03", "t04", "t06"],
+      concepts: [
+        { label: "macOS command", alternatives: ["macos", "darwin", "gtimeout"] },
+        { label: "successful replacement", alternatives: ["gtimeout 10 ./verify-auth", "gtimeout", "prefixed"] },
+        { label: "negative Linux scope", alternatives: ["linux", "do not apply", "plain timeout"] },
+      ],
+      forbiddenClaims: ["plain timeout works on this mac", "use gtimeout on linux"],
+      maxLessons: 1,
+    },
+  },
   {
     id: "generated-config-correction",
     title: "User corrects a generated-file edit and generic verifier",
@@ -372,8 +416,11 @@ export function renderReflectionPrompt(scenario: ReflectionScenario): Result<{ r
     "Reflect on this completed project conversation. Decide whether it supports a durable harness evolution.",
     "User corrections and later observed outcomes override earlier assistant assumptions or passing but stale checks.",
     "Choose no-change for temporary, explicitly non-generalizable, or unsupported behavior. Otherwise choose evolve and cite the transcript turn IDs that directly support each lesson.",
-    "Targets: knowledge for a project fact, skill for a repeatable procedure, runner for an always-on decision rule, tool for a missing executable capability, or policy for a safety boundary.",
+    "Targets: knowledge for a project fact; skill for a repeatable or conditional procedure, including host/environment command corrections; runner only for a project-wide decision rule that must apply to every task without retrieval; tool for a missing executable capability; or policy for a safety boundary.",
     "For every lesson, provide narrow repository-relative relevantPaths plus concrete appliesWhen and doesNotApplyWhen conditions. Paths may be `.` or concrete forward-slash paths; never use absolute paths, backslashes, globs, or placeholder angle brackets. Use an empty array only when the evidence cannot support that field.",
+    "For every skill, make appliesWhen behaviorally portable: each observable contract must have at least one distinct trigger grounded in that contract's operation and an exact value, input, output, error, or side effect. Include exact function/route/command names and wire values such as status or error codes so deterministic retrieval can match them. Repository paths stay project-scoped, but applicability must survive renamed projects, modules, and domain nouns that expose the same behavior. Never use only a project, repository, service, or application name as a trigger.",
+    "Never exclude a lesson merely because the same behavior appears in a renamed project, repository, service, or application. doesNotApplyWhen must describe a behavioral boundary where the learned contract is irrelevant, not a source-identity boundary.",
+    "For every skill lesson, include one observableContracts entry per learned operation. Explicitly record inputs, outputs, errors, sideEffects, and exactValues. Each field must be non-empty; use the literal 'none' only when the evidence establishes no behavior in that category. Preserve direct returns versus envelopes, thrown versus returned errors, exact status/body shapes, and side-effect ordering.",
     "Return exactly one JSON object and no prose or code fence. lessons must be empty for no-change and contain 1-4 items for evolve.",
     JSON.stringify({
       reflection: "short evidence-grounded synthesis",
@@ -386,6 +433,14 @@ export function renderReflectionPrompt(scenario: ReflectionScenario): Result<{ r
         relevantPaths: ["project/relative/path"],
         appliesWhen: ["specific triggering task condition"],
         doesNotApplyWhen: ["specific adjacent task that must not trigger it"],
+        observableContracts: [{
+          operation: "exact function, route, command, or workflow step",
+          inputs: ["accepted inputs and normalization"],
+          outputs: ["direct return value or exact response shape"],
+          errors: ["thrown error or exact status/body"],
+          sideEffects: ["state/process/file effects and ordering"],
+          exactValues: ["verbatim signature, path, command, code, status, or literal"],
+        }],
       }],
     }),
     "Conversation evidence:",
@@ -399,14 +454,39 @@ function containsAny(text: string, alternatives: readonly string[]): boolean {
   return alternatives.some((alternative) => normalized.includes(alternative.toLocaleLowerCase("en-US")));
 }
 
-function proposalText(proposal: ReflectionProposal): string {
-  return [proposal.reflection, ...proposal.lessons.flatMap((lesson) => [lesson.title, lesson.guidance])].join("\n");
+function actionableProposalText(proposal: ReflectionProposal): string {
+  return proposal.lessons.flatMap((lesson) => [lesson.title, lesson.guidance]).join("\n");
+}
+
+function lastMatchEnd(text: string, expression: RegExp): number {
+  let end = -1;
+  for (const match of text.matchAll(expression)) end = match.index + match[0].length;
+  return end;
+}
+
+function explicitlyProhibited(prefix: string): boolean {
+  const clause = prefix.slice(Math.max(prefix.lastIndexOf("."), prefix.lastIndexOf("!"), prefix.lastIndexOf("?"), prefix.lastIndexOf(";"), prefix.lastIndexOf("\n")) + 1);
+  const negationEnd = lastMatchEnd(clause, /\b(?:never|do not|don't|must not|mustn't|should not|shouldn't|cannot|can't|avoid|forbid(?:den)?|prohibit(?:ed)?)\b/gu);
+  if (negationEnd < 0) return false;
+  const contrastEnd = lastMatchEnd(clause, /\b(?:but|however|instead)\b/gu);
+  return negationEnd > contrastEnd;
+}
+
+function containsForbiddenEndorsement(text: string, claim: string): boolean {
+  const normalized = text.toLocaleLowerCase("en-US");
+  const forbidden = claim.toLocaleLowerCase("en-US");
+  let offset = normalized.indexOf(forbidden);
+  while (offset >= 0) {
+    if (!explicitlyProhibited(normalized.slice(0, offset))) return true;
+    offset = normalized.indexOf(forbidden, offset + forbidden.length);
+  }
+  return false;
 }
 
 export function scoreReflection(scenario: ReflectionScenario, proposal: ReflectionProposal): ReflectionScore {
   const rubric = scenario.rubric;
-  const allText = proposalText(proposal);
-  const contradictionFree = !rubric.forbiddenClaims.some((claim) => allText.toLocaleLowerCase("en-US").includes(claim.toLocaleLowerCase("en-US")));
+  const contradictionText = rubric.decision === "no-change" ? proposal.reflection : actionableProposalText(proposal);
+  const contradictionFree = !rubric.forbiddenClaims.some((claim) => containsForbiddenEndorsement(contradictionText, claim));
 
   if (rubric.decision === "no-change") {
     const concepts = rubric.reflectionConcepts.map((concept) => containsAny(proposal.reflection, concept.alternatives));
@@ -495,4 +575,41 @@ export async function runReflectionScenario(
     route: completion.route,
     usage: completion.usage,
   } };
+}
+
+function reflectionRetryReason(error: EvolutionError): ReflectionRetry["reason"] | null {
+  if ((error.kind === "provider-unavailable" || error.kind === "provider-rate-limited") && error.recoverable) {
+    return "provider";
+  }
+  if (error.kind === "validation" && error.field?.startsWith("modelOutput") === true) {
+    return "model-output";
+  }
+  return null;
+}
+
+export async function runReflectionScenarioWithRetries(
+  models: ModelRouter,
+  scenario: ReflectionScenario,
+  options: ReflectionRetryOptions = {},
+): Promise<Result<RetriedReflectionRun, EvolutionError>> {
+  const maxAttempts = Math.max(1, Math.min(5, options.maxAttempts ?? 3));
+  const waitBeforeRetry = options.waitBeforeRetry ?? (async (delayMs: number) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  });
+  const retries: ReflectionRetry[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await runReflectionScenario(models, scenario);
+    if (result.ok) {
+      return { ok: true, value: { run: result.value, attempts: attempt, retries } };
+    }
+    const reason = reflectionRetryReason(result.error);
+    if (reason === null || attempt === maxAttempts) return result;
+    const retry = { failedAttempt: attempt, reason, error: result.error } as const;
+    retries.push(retry);
+    options.onRetry?.(retry, attempt + 1, maxAttempts);
+    if (reason === "provider") await waitBeforeRetry(attempt * 1_000);
+  }
+
+  return validation("Reflection retry loop ended without a result.", "modelOutput");
 }

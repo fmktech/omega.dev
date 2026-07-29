@@ -43,6 +43,15 @@ export async function createReflectionSkillCandidate(
   if (lessons.length === 0) {
     return invalid("Reflection contains no skill-targeted lessons.", "proposal.lessons");
   }
+  if (lessons.some((lesson) => (lesson.relevantPaths?.length ?? 0) === 0
+    || (lesson.appliesWhen?.length ?? 0) === 0
+    || (lesson.doesNotApplyWhen?.length ?? 0) === 0
+    || (lesson.observableContracts?.length ?? 0) === 0)) {
+    return invalid(
+      "Skill candidates require applicability metadata and a complete observable contract ledger.",
+      "proposal.lessons",
+    );
+  }
 
   const namedLessons = lessons.map((lesson) => ({ lesson, name: skillName(lesson.title, lesson.guidance) }));
   const names = new Set<string>();
@@ -145,6 +154,7 @@ function reflectionEvidenceSha(input: ReflectionSkillCandidateInput): Sha256 {
       relevantPaths: normalizedStrings(lesson.relevantPaths),
       appliesWhen: normalizedStrings(lesson.appliesWhen),
       doesNotApplyWhen: normalizedStrings(lesson.doesNotApplyWhen),
+      observableContracts: normalizedContracts(lesson.observableContracts),
     })),
   };
   return hash(canonical(value)) as Sha256;
@@ -165,6 +175,7 @@ function renderSkillMarkdown(input: {
   const relevantPaths = unique(input.lessons.flatMap((lesson) => normalizedPaths(lesson.relevantPaths)));
   const appliesWhen = unique(input.lessons.flatMap((lesson) => normalizedStrings(lesson.appliesWhen)));
   const doesNotApplyWhen = unique(input.lessons.flatMap((lesson) => normalizedStrings(lesson.doesNotApplyWhen)));
+  const observableContracts = input.lessons.flatMap((lesson) => normalizedContracts(lesson.observableContracts));
   const provenance = JSON.stringify({
     sourceSessionId: input.sourceSessionId,
     evidenceArtifactIds: [...new Set(input.evidenceArtifactIds)].sort(),
@@ -190,6 +201,24 @@ function renderSkillMarkdown(input: {
     "## Skill guidance",
     "",
     input.guidance.trim(),
+    "",
+    "## Observable contract ledger",
+    "",
+    "These contracts are authoritative. Preserve direct return values, thrown errors, side effects, and exact wire shapes; do not replace them with a different envelope or convention.",
+    "",
+    "```json",
+    JSON.stringify(observableContracts, null, 2),
+    "```",
+    "",
+    "## Bounded application protocol",
+    "",
+    "Use this protocol when the skill applies. It is a completion contract, not optional advice.",
+    "",
+    "1. Inspect the repository instructions and current workspace once. Map historical `relevantPaths` cues to files that actually exist; do not keep probing absent paths.",
+    "2. Turn every observable-contract entry into one focused verification case before editing. Prefer the repository's existing test framework; otherwise create one temporary verifier that exercises the ledger through public behavior.",
+    "3. Make the smallest coherent implementation that satisfies those cases. Do not invent behavior outside the ledger and current task.",
+    "4. Run the focused verifier once after the implementation. If it fails, repair only the named failing contracts and rerun it once.",
+    "5. Run the repository's required verification once, remove temporary artifacts, audit every ledger row against observed results, and stop. Do not restart open-ended exploration after the audit passes.",
     ...input.lessons.filter((lesson) => lesson.target !== "skill").flatMap((lesson) => [
       "",
       `## Companion ${lesson.target}`,
@@ -220,8 +249,20 @@ function skillSemanticSha(name: string, proposal: ReflectionProposal): Sha256 {
       relevantPaths: normalizedPaths(lesson.relevantPaths),
       appliesWhen: normalizedStrings(lesson.appliesWhen),
       doesNotApplyWhen: normalizedStrings(lesson.doesNotApplyWhen),
+      observableContracts: normalizedContracts(lesson.observableContracts),
     })),
   })) as Sha256;
+}
+
+function normalizedContracts(values: ReflectionProposal["lessons"][number]["observableContracts"]): JsonValue[] {
+  return (values ?? []).map((contract) => ({
+    operation: singleLine(contract.operation),
+    inputs: normalizedStrings(contract.inputs),
+    outputs: normalizedStrings(contract.outputs),
+    errors: normalizedStrings(contract.errors),
+    sideEffects: normalizedStrings(contract.sideEffects),
+    exactValues: normalizedStrings(contract.exactValues),
+  }));
 }
 
 function normalizedPaths(values: readonly string[] | undefined): string[] {

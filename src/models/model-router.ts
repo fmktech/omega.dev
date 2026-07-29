@@ -7,6 +7,7 @@ import type {
   ModelRequest,
   ModelRouter,
   ModelStream,
+  ModelStreamEvent,
   ModelStreamId,
   OmegaConfig,
   Result,
@@ -21,11 +22,40 @@ import {
 
 export type ModelRouterRuntime = {
   readonly createStreamId: () => ModelStreamId;
+  readonly waitBeforeRetry?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 };
 
 const DEFAULT_RUNTIME: ModelRouterRuntime = {
   createStreamId: () => randomUUID() as ModelStreamId,
+  waitBeforeRetry: async (delayMs, signal) => {
+    if (signal.aborted || delayMs <= 0) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timeout = setTimeout(done, delayMs);
+      signal.addEventListener("abort", done, { once: true });
+    });
+  },
 };
+
+const MAX_PROVIDER_ATTEMPTS = 3;
+
+function retryDelayMs(error: ModelError, failedAttempt: number): number | null {
+  if (error.kind === "provider-rate-limited" && error.recoverable) {
+    return error.retryAfterMs ?? failedAttempt * 250;
+  }
+  if (error.kind === "provider-unavailable" && error.recoverable) {
+    return failedAttempt * 250;
+  }
+  return null;
+}
+
+function failedEvent(streamId: ModelStreamId, error: ModelError): ModelStreamEvent {
+  return { kind: "failed", streamId, error, partialArtifactId: null };
+}
 
 function capabilityDenied(request: ModelRequest): ModelError {
   return {
@@ -109,19 +139,90 @@ export function createModelRouterWithRegistry(
       const controller = new AbortController();
       const streamId = runtime.createStreamId();
       const timeoutMs = effectiveTimeout(request, capabilities);
+      const deadlineMs = Date.now() + timeoutMs;
       const timeout = setTimeout(() => controller.abort("model timeout"), timeoutMs);
       timeout.unref();
 
-      const started = await registry.start(request, streamId, controller.signal, timeoutMs);
+      const waitBeforeRetry = runtime.waitBeforeRetry ?? DEFAULT_RUNTIME.waitBeforeRetry;
+      let attempt = 1;
+      let started = await registry.start(request, streamId, controller.signal, timeoutMs);
+      while (!started.ok) {
+        const delayMs = retryDelayMs(started.error, attempt);
+        const remainingMs = deadlineMs - Date.now();
+        if (
+          delayMs === null
+          || attempt >= MAX_PROVIDER_ATTEMPTS
+          || controller.signal.aborted
+          || delayMs >= remainingMs
+        ) {
+          clearTimeout(timeout);
+          return started;
+        }
+        await waitBeforeRetry?.(delayMs, controller.signal);
+        if (controller.signal.aborted) {
+          clearTimeout(timeout);
+          return started;
+        }
+        attempt += 1;
+        started = await registry.start(request, streamId, controller.signal, Math.max(1, deadlineMs - Date.now()));
+      }
+
       if (!started.ok) {
         clearTimeout(timeout);
         return started;
       }
 
-      const providerStream = started.value;
+      let providerStream = started.value;
       async function* events() {
         try {
-          yield* providerStream.events;
+          let visibleOutput = false;
+          while (true) {
+            let cleanFailure: ModelError | null = null;
+            for await (const event of providerStream.events) {
+              if (event.kind === "failed" && !visibleOutput && retryDelayMs(event.error, attempt) !== null) {
+                cleanFailure = event.error;
+                break;
+              }
+              visibleOutput = true;
+              yield event;
+            }
+
+            if (cleanFailure === null) return;
+            await providerStream.cancel("retrying recoverable provider failure");
+
+            while (true) {
+              const delayMs = retryDelayMs(cleanFailure, attempt);
+              const remainingMs = deadlineMs - Date.now();
+              if (
+                delayMs === null
+                || attempt >= MAX_PROVIDER_ATTEMPTS
+                || controller.signal.aborted
+                || delayMs >= remainingMs
+              ) {
+                yield failedEvent(streamId, cleanFailure);
+                return;
+              }
+
+              await waitBeforeRetry?.(delayMs, controller.signal);
+              if (controller.signal.aborted) {
+                yield failedEvent(streamId, cleanFailure);
+                return;
+              }
+
+              attempt += 1;
+              const restarted = await registry.start(
+                request,
+                streamId,
+                controller.signal,
+                Math.max(1, deadlineMs - Date.now()),
+              );
+              if (restarted.ok) {
+                providerStream = restarted.value;
+                break;
+              }
+              cleanFailure = restarted.error;
+            }
+          }
         } finally {
           clearTimeout(timeout);
         }

@@ -11,6 +11,7 @@ import type {
   ArtifactId,
   ArtifactRecord,
   ByteCount,
+  ChildId,
   CredentialEnvName,
   DurationMs,
   EventId,
@@ -272,7 +273,25 @@ describe("filesystem persistence", () => {
     }
   });
 
-  it("commits exactly one concurrent terminal event and rejects every post-terminal append", async () => {
+  it("round-trips a skill-loaded event through the persisted session log", async () => {
+    const fixture = await sessionFixture();
+    const appended = await fixture.sessions.append(
+      fixture.header.id,
+      0,
+      { kind: "skill.loaded", componentId: "component_reflected_skill" as never },
+      fixture.header.initialHarnessId,
+      null,
+    );
+    expect(appended.ok).toBe(true);
+
+    const events = await fixture.sessions.read(fixture.header.id, 0, 10);
+    expect(events).toMatchObject({
+      ok: true,
+      value: [{ payload: { kind: "skill.loaded", componentId: "component_reflected_skill" } }],
+    });
+  });
+
+  it("commits exactly one terminal event, accepts governance lineage, and rejects operational post-terminal appends", async () => {
     const fixture = await sessionFixture();
     const started = await fixture.sessions.append(
       fixture.header.id, 0, { kind: "session.started" }, fixture.header.initialHarnessId, null,
@@ -286,14 +305,47 @@ describe("filesystem persistence", () => {
     ]);
 
     expect(terminals.filter((result) => result.ok)).toHaveLength(1);
-    const afterTerminal = await fixture.sessions.append(
-      fixture.header.id, 2, { kind: "session.recovered", interruptedProcessIds: [] }, fixture.header.initialHarnessId, null,
+    const childSpawned = await fixture.sessions.append(
+      fixture.header.id,
+      2,
+      {
+        kind: "child.spawned",
+        child: {
+          childId: "child_post_session_evolution" as ChildId,
+          sessionId: "session_post_session_evolution" as SessionId,
+          parentSessionId: fixture.header.id,
+          spawnEventId: "event_post_session_evolution" as EventId,
+          role: "evolution",
+          state: "running",
+        },
+      },
+      fixture.header.initialHarnessId,
+      "event_post_session_evolution" as EventId,
     );
-    expect(afterTerminal.ok).toBe(false);
-    if (!afterTerminal.ok) expect(afterTerminal.error.kind).toBe("conflict");
+    expect(childSpawned.ok).toBe(true);
+
+    const afterLineage = await fixture.sessions.get(fixture.header.id);
+    expect(afterLineage.ok).toBe(true);
+    if (!afterLineage.ok) return;
+    expect(afterLineage.value.outcome).not.toBeNull();
+    expect(afterLineage.value.completedAt).not.toBeNull();
+    expect(afterLineage.value.lastSequence).toBe(3);
+
+    const operationalAppend = await fixture.sessions.append(
+      fixture.header.id, 3, { kind: "session.recovered", interruptedProcessIds: [] }, fixture.header.initialHarnessId, null,
+    );
+    expect(operationalAppend.ok).toBe(false);
+    if (!operationalAppend.ok) expect(operationalAppend.error.kind).toBe("conflict");
     const events = await fixture.sessions.read(fixture.header.id, 0, 10);
     expect(events.ok).toBe(true);
-    if (events.ok) expect(events.value.filter((event) => event.payload.kind === "session.completed")).toHaveLength(1);
+    if (events.ok) {
+      expect(events.value.filter((event) => event.payload.kind === "session.completed")).toHaveLength(1);
+      expect(events.value.map((event) => event.payload.kind)).toEqual([
+        "session.started",
+        "session.completed",
+        "child.spawned",
+      ]);
+    }
   });
 
   it("drops only a trailing partial JSONL record and preserves valid history", async () => {

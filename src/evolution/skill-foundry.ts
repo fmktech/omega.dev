@@ -24,12 +24,24 @@ const MAX_FILES = 32;
 const MAX_CHECKS = 16;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_FIXTURE_BYTES = 256 * 1024;
+const MAX_VERIFIER_FILES = 4;
+const MAX_VERIFIER_BYTES = 64 * 1024;
+const MAX_VERIFIER_ARGS = 32;
 
 type Check = {
   readonly path: string;
   readonly equals?: string;
   readonly contains?: string;
+  readonly notContains?: string;
   readonly absent?: boolean;
+};
+
+type ExecutableVerifier = {
+  readonly files: Readonly<Record<string, string>>;
+  readonly command: {
+    readonly executable: string;
+    readonly args: readonly string[];
+  };
 };
 
 type Fixture = {
@@ -38,6 +50,7 @@ type Fixture = {
   readonly objective: string;
   readonly files: Readonly<Record<string, string>>;
   readonly checks: readonly Check[];
+  readonly verifier: ExecutableVerifier;
   readonly invariants: readonly Check[];
 };
 
@@ -75,7 +88,7 @@ export async function compileSkillEvalSuite(
     if (!fixtureHash.ok) return fixtureHash;
     const environmentHash = await putJson(objects, { os: "linux", isolation: "oci", network: "none", variation });
     if (!environmentHash.ok) return environmentHash;
-    const verifierHash = await putJson(objects, { checks: fixture.checks });
+    const verifierHash = await putJson(objects, { checks: fixture.checks, executable: fixture.verifier });
     if (!verifierHash.ok) return verifierHash;
     const invariantHash = await putJson(objects, { checks: fixture.invariants });
     if (!invariantHash.ok) return invariantHash;
@@ -160,6 +173,9 @@ function parseProposal(text: string): Result<readonly Fixture[], EvolutionError>
       || !isRecord(raw["files"]) || !Array.isArray(raw["checks"]) || !Array.isArray(raw["invariants"])) {
       return invalid("A skill evaluation fixture has an invalid shape.", field);
     }
+    if (!isRecord(raw["verifier"])) {
+      return invalid("A skill evaluation fixture requires an executable behavioral verifier.", `${field}.verifier`);
+    }
     const title = raw["title"].trim();
     const objective = raw["objective"].trim();
     if (title.length === 0 || title.length > 160 || objective.length === 0 || objective.length > 2_000) {
@@ -179,18 +195,80 @@ function parseProposal(text: string): Result<readonly Fixture[], EvolutionError>
     if (fixtureBytes > MAX_FIXTURE_BYTES) return invalid("Fixture contents exceed their total byte budget.", `${field}.files`);
     const checks = parseChecks(raw["checks"], `${field}.checks`);
     if (!checks.ok) return checks;
+    const verifier = parseExecutableVerifier(raw["verifier"], `${field}.verifier`);
+    if (!verifier.ok) return verifier;
     const invariants = parseChecks(raw["invariants"], `${field}.invariants`);
     if (!invariants.ok) return invariants;
+    if (!checksPass(files, invariants.value)) {
+      return invalid("Untouched fixture files must satisfy every negative invariant.", `${field}.invariants`);
+    }
     fixtures.push({
       variation: raw["variation"] as SkillEvalVariation,
       title,
       objective,
       files,
       checks: checks.value,
+      verifier: verifier.value,
       invariants: invariants.value,
     });
   }
   return { ok: true, value: fixtures };
+}
+
+function parseExecutableVerifier(value: Readonly<Record<string, unknown>>, field: string): Result<ExecutableVerifier, EvolutionError> {
+  const rawFiles = value["files"];
+  const rawCommand = value["command"];
+  if (!isRecord(rawFiles) || !isRecord(rawCommand)) {
+    return invalid("Executable verifier requires private files and a command.", field);
+  }
+  const entries = Object.entries(rawFiles);
+  if (entries.length === 0 || entries.length > MAX_VERIFIER_FILES) {
+    return invalid("Executable verifier file count is outside its bound.", `${field}.files`);
+  }
+  const files: Record<string, string> = {};
+  let totalBytes = 0;
+  for (const [path, content] of entries) {
+    if (!safePath(path) || typeof content !== "string") {
+      return invalid("Executable verifier files require safe relative paths and string contents.", `${field}.files`);
+    }
+    totalBytes += Buffer.byteLength(content);
+    if (Buffer.byteLength(content) > MAX_FILE_BYTES || totalBytes > MAX_VERIFIER_BYTES) {
+      return invalid("Executable verifier contents exceed their byte budget.", `${field}.files`);
+    }
+    if (hasHardcodedStatePreservationLength(content)) {
+      return invalid(
+        "A state-preservation assertion must compare the after-state with a snapshot captured immediately before the operation; it cannot assert a hardcoded collection length.",
+        `${field}.files.${path}`,
+      );
+    }
+    files[path] = content;
+  }
+  const executable = rawCommand["executable"];
+  const args = rawCommand["args"];
+  if (typeof executable !== "string" || executable.length === 0 || executable.length > 128
+    || executable.includes("\0") || executable.includes("/") || !Array.isArray(args)
+    || args.length > MAX_VERIFIER_ARGS || args.some((arg) => typeof arg !== "string" || arg.length > 1_024 || arg.includes("\0"))) {
+    return invalid("Executable verifier command is invalid or outside its bound.", `${field}.command`);
+  }
+  return {
+    ok: true,
+    value: {
+      files,
+      command: { executable, args: args as readonly string[] },
+    },
+  };
+}
+
+function hasHardcodedStatePreservationLength(source: string): boolean {
+  const assertionCalls = source.matchAll(/\bassert(?:\.[A-Za-z][A-Za-z0-9_]*)?\s*\(([\s\S]*?)\)\s*;?/gu);
+  for (const match of assertionCalls) {
+    const assertion = match[1] ?? "";
+    if (/\.length\s*,\s*\d+\b/u.test(assertion)
+      && /(?:\bunchang|\bpreserv|\bremain|\bnot\s+(?:have\s+)?(?:delet|remov|mutat))/iu.test(assertion)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function parseChecks(value: readonly unknown[], field: string): Result<readonly Check[], EvolutionError> {
@@ -202,13 +280,39 @@ function parseChecks(value: readonly unknown[], field: string): Result<readonly 
     }
     const equals = typeof raw["equals"] === "string" ? raw["equals"] : undefined;
     const contains = typeof raw["contains"] === "string" ? raw["contains"] : undefined;
+    const notContains = typeof raw["notContains"] === "string"
+      ? raw["notContains"]
+      : typeof raw["absent"] === "string" ? raw["absent"] : undefined;
     const absent = typeof raw["absent"] === "boolean" ? raw["absent"] : undefined;
-    if (equals === undefined && contains === undefined && absent === undefined) {
-      return invalid("Fixture check must define equals, contains, or absent.", field);
+    if (equals === undefined && contains === undefined && notContains === undefined && absent === undefined) {
+      return invalid("Fixture check must define equals, contains, notContains, or absent.", field);
     }
-    checks.push({ path: raw["path"], ...(equals === undefined ? {} : { equals }), ...(contains === undefined ? {} : { contains }), ...(absent === undefined ? {} : { absent }) });
+    checks.push({
+      path: raw["path"],
+      ...(equals === undefined ? {} : { equals }),
+      ...(contains === undefined ? {} : { contains }),
+      ...(notContains === undefined ? {} : { notContains }),
+      ...(absent === undefined ? {} : { absent }),
+    });
   }
   return { ok: true, value: checks };
+}
+
+function checksPass(files: Readonly<Record<string, string>>, checks: readonly Check[]): boolean {
+  for (const check of checks) {
+    const content = files[check.path];
+    if (check.absent === true) {
+      if (content !== undefined) return false;
+      continue;
+    }
+    if (content === undefined
+      || (check.equals !== undefined && content !== check.equals)
+      || (check.contains !== undefined && !content.includes(check.contains))
+      || (check.notContains !== undefined && content.includes(check.notContains))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function putJson(objects: ObjectStore, value: JsonValue): Promise<Result<ObjectHash, EvolutionError>> {

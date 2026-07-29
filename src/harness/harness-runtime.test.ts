@@ -44,7 +44,7 @@ import type {
 } from "../contracts/index.js";
 import { createHarnessActivationService } from "./activation-service.js";
 import { createHarnessRepository } from "./harness-repository.js";
-import { createInitialHarness } from "./initial-harness.js";
+import { createInitialHarness, createInitialRunnerUpgrade } from "./initial-harness.js";
 import {
   createExperienceFedMiniSweCandidate,
   createMiniSweBaselineCandidate,
@@ -100,6 +100,7 @@ describe("harness runtime", () => {
     expect(source).toContain("cpuTimeLimitMs:1800000");
     expect(source).not.toContain("cpuTimeLimitMs:3600000");
     expect(source).toContain('role:route?.role||"main-coder"');
+    expect(source).toContain("sourceSessionIds:[session.id]");
     const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
     const lines = lineReader(child.stdout);
     child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) } })}\n`);
@@ -119,6 +120,12 @@ describe("harness runtime", () => {
     const modelStart = await lines.next();
     expect(modelStart).toMatchObject({ message: { kind: "runner.request", request: { kind: "model.start", request: { tools: expect.arrayContaining([expect.objectContaining({ name: "skill.read" })]) } } } });
     const modelRequest = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+    const modelTools = modelRequest["tools"] as readonly JsonObject[];
+    const knowledgeWrite = modelTools.find((tool) => tool["name"] === "knowledge.write");
+    expect(knowledgeWrite).toMatchObject({ inputSchema: { properties: { document: {
+      required: ["frontmatter", "markdown"],
+      properties: { frontmatter: { required: ["id", "title", "summary", "tags", "confidence", "relevantPaths", "invalidationConditions"] } },
+    } } } });
     const systemText = (((modelRequest["messages"] as readonly JsonObject[])[0]?.["content"] as readonly JsonObject[])[0]?.["text"] as string);
     expect(systemText).toContain("Instruction file: AGENTS.md");
     expect(systemText).toContain("Use just verify.");
@@ -132,8 +139,56 @@ describe("harness runtime", () => {
     child.kill("SIGTERM");
   });
 
-  it("serves repeated immutable skill reads from the session cache", async () => {
-    const fixture = await repositoryFixture("skill-read-cache");
+  it("advertises no model tools to a zero-grant proposal child without explicit evidence", async () => {
+    const fixture = await repositoryFixture("zero-grant-proposal-tools");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    expect(runner).toBeDefined();
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      const base = runnerStart(created.value, fixture.workspace);
+      send({ kind: "kernel.start", start: {
+        ...base,
+        handoffArtifactId: "artifact-handoff",
+        session: {
+          ...base.session,
+          role: "evolution",
+          continuation: {
+            sourceSessionId: base.session.id,
+            handoffArtifactId: "artifact-handoff",
+            contextArtifactIds: [],
+          },
+          capabilityEnvelope: { ...base.session.capabilityEnvelope, grants: [] },
+        },
+      } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const handoff = await lines.next();
+      const handoffId = ((handoff["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "artifact.read", requestId: handoffId, result: { ok: true, value: {
+        artifact: {}, range: { startInclusive: 0, endExclusive: 2 }, encoding: "utf8", data: "{}", complete: true,
+      } } } });
+      const modelStart = await lines.next();
+      expect(modelStart).toMatchObject({ message: { request: { kind: "model.start", request: { tools: [] } } } });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("retries a recoverable model failure without discarding the conversation", async () => {
+    const fixture = await repositoryFixture("recoverable-model-retry");
     const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
     expect(created.ok).toBe(true);
     if (!created.ok) return;
@@ -145,7 +200,463 @@ describe("harness runtime", () => {
     const send = (message: JsonObject): void => {
       child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
     };
-    send({ kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) });
+    try {
+      send({ kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], workspaceFiles: ["src/index.ts"], workspaceInventoryTruncated: false, knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const firstStart = await lines.next();
+      const firstRequest = ((firstStart["message"] as JsonObject)["request"] as JsonObject);
+      const firstRequestId = firstRequest["requestId"] as string;
+      const route = modelRoute();
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: firstRequestId, result: { ok: true, value: { streamId: "stream-first", route } } } });
+      send({ kind: "kernel.event", event: { kind: "model.event", event: {
+        kind: "failed", streamId: "stream-first", partialArtifactId: null,
+        error: { kind: "provider-unavailable", providerId: "openrouter", reason: "HTTP 400", recoverable: true, callerAction: "choose-different-route" },
+      } } });
+      const retry = await lines.next();
+      expect(retry).toMatchObject({ message: { request: { kind: "model.start" } } });
+      const retryRequest = ((retry["message"] as JsonObject)["request"] as JsonObject);
+      const retryRequestId = retryRequest["requestId"] as string;
+      expect((retryRequest["request"] as JsonObject)["messages"]).toEqual((firstRequest["request"] as JsonObject)["messages"]);
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: retryRequestId, result: { ok: true, value: { streamId: "stream-retry", route } } } });
+      send({ kind: "kernel.event", event: { kind: "model.event", event: { kind: "completed", completion: {
+        ...modelCompletion(route), streamId: "stream-retry",
+      } } } });
+      await expect(lines.next()).resolves.toMatchObject({ message: { request: { kind: "session.complete", outcome: "succeeded" } } });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("advertises only workspace execution tools to a promotion worker", async () => {
+    const fixture = await repositoryFixture("promotion-worker-tools");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      const base = runnerStart(created.value, fixture.workspace);
+      send({ kind: "kernel.start", start: { ...base, session: { ...base.session, role: "promotion-eval" } } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const modelStart = await lines.next();
+      const request = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+      expect((request["tools"] as readonly JsonObject[]).map((tool) => tool["name"])).toEqual([
+        "file.read", "file.write", "process.start", "process.observe", "process.input", "process.cancel",
+      ]);
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("loads a supplied handoff exactly once before the first model turn", async () => {
+    const fixture = await repositoryFixture("handoff-bootstrap");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    expect(runner).toBeDefined();
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), handoffArtifactId: "artifact-handoff" } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const handoff = await lines.next();
+      expect(handoff).toMatchObject({ message: { request: { kind: "artifact.read", artifactId: "artifact-handoff", offset: 0, limit: 65536 } } });
+      const handoffId = ((handoff["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "artifact.read", requestId: handoffId, result: { ok: true, value: {
+        artifact: {}, range: { startInclusive: 0, endExclusive: 28 }, encoding: "utf8", data: '{"decisions":["use Node 24"]}', complete: true,
+      } } } });
+      const modelStart = await lines.next();
+      expect(modelStart).toMatchObject({ message: { request: { kind: "model.start" } } });
+      const request = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+      const systemText = (((request["messages"] as readonly JsonObject[])[0]?.["content"] as readonly JsonObject[])[0]?.["text"] as string);
+      expect(systemText).toContain("Prior-session handoff");
+      expect(systemText).toContain("use Node 24");
+      expect(systemText).toContain("After every process.start, call process.observe");
+      expect(systemText).toContain("sandbox sees that same repository at /workspace");
+      expect(systemText).toContain("file.read accepts files, not directories");
+      expect(systemText).toContain("Authoritative session-start workspace inventory");
+      expect(systemText).toContain("Separate process.start calls do not share localhost");
+      expect(systemText).toContain("start the server, issue requests, assert, and close the server inside one process");
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("preloads an applicable skill when an opposite negative cue negates the shared terms", async () => {
+    const fixture = await repositoryFixture("automatic-skill-retrieval");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), session: {
+        ...runnerStart(created.value, fixture.workspace).session,
+        objective: "Implement listLots so it trims locationId whitespace and returns the raw array",
+      } } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [{
+          componentId: "component_storage", name: "storage-contracts", description: "Storage contracts", tags: ["storage"],
+          relevantPaths: ["src/domain/repository.js"], appliesWhen: ["listLots trims locationId whitespace and returns a raw array"],
+          doesNotApplyWhen: [
+            "Adding authentication or authorization",
+            "listLots does not filter or does not trim whitespace from locationId, or returns wrapped array",
+          ],
+        }],
+      } } } });
+      const skillRead = await lines.next();
+      expect(skillRead).toMatchObject({ message: { request: { kind: "skill.read", componentId: "component_storage" } } });
+      const skillReadId = ((skillRead["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "skill.read", requestId: skillReadId, result: { ok: true, value: {
+        componentId: "component_storage", objectHash: "b".repeat(64), catalog: {}, markdown: "# Storage contracts\n\nTrim locationId and return a raw array.\n",
+      } } } });
+      const modelStart = await lines.next();
+      const request = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+      const systemText = (((request["messages"] as readonly JsonObject[])[0]?.["content"] as readonly JsonObject[])[0]?.["text"] as string);
+      expect(systemText).toContain("Automatically selected project skill");
+      expect(systemText).toContain("Trim locationId and return a raw array");
+      expect(systemText).toContain("already loaded; do not call skill.read for it");
+      expect(systemText).toContain("relevantPaths are historical retrieval cues");
+      expect(systemText).toContain("Inspect the current workspace once");
+      expect(systemText).toContain("Use the skill's Bounded application protocol as a completion contract");
+      expect(systemText).toContain("Do not replace the protocol with open-ended exploratory testing");
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("uses exact three-digit HTTP statuses as automatic skill retrieval cues", async () => {
+    const fixture = await repositoryFixture("http-status-skill-retrieval");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), session: {
+        ...runnerStart(created.value, fixture.workspace).session,
+        objective: "Ensure a large request returns HTTP 413",
+      } } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [{
+          componentId: "component_http", name: "http-contracts", description: "HTTP boundary contracts", tags: ["http"],
+          relevantPaths: ["src/http.js"],
+          appliesWhen: ["Oversized payload uses HTTP 413", "Unknown routes use HTTP 404"],
+          doesNotApplyWhen: ["The task does not expose an HTTP boundary"],
+        }],
+      } } } });
+      const skillRead = await lines.next();
+      expect(skillRead).toMatchObject({ message: { request: { kind: "skill.read", componentId: "component_http" } } });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("does not preload a skill when a negative applicability cue matches", async () => {
+    const fixture = await repositoryFixture("negative-skill-retrieval");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), session: {
+        ...runnerStart(created.value, fixture.workspace).session,
+        objective: "Build an authenticated Express framework API with Passport authentication",
+      } } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [{
+          componentId: "component_storage", name: "storage-contracts", description: "Storage HTTP server", tags: ["http"],
+          relevantPaths: ["src/domain/repository.js"], appliesWhen: ["Need HTTP server without Express or external frameworks"],
+          doesNotApplyWhen: ["Authentication or another framework is required"],
+        }],
+      } } } });
+      const modelStart = await lines.next();
+      expect(modelStart).toMatchObject({ message: { request: { kind: "model.start" } } });
+      const modelStartId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      const route = modelRoute();
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: modelStartId, result: { ok: true, value: { streamId: "stream-excluded-skill", route } } } });
+      send({
+        kind: "kernel.event",
+        event: {
+          kind: "model.event",
+          event: {
+            kind: "completed",
+            completion: {
+              ...modelCompletion(route),
+              streamId: "stream-excluded-skill",
+              content: [{ kind: "tool-call", callId: "read-excluded", toolName: "skill.read", input: { componentId: "component_storage" } }],
+            },
+          },
+        },
+      });
+      const retryModel = await lines.next();
+      expect(retryModel).toMatchObject({ message: { request: { kind: "model.start" } } });
+      const retryRequest = ((retryModel["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+      expect((retryRequest["messages"] as readonly JsonObject[]).at(-1)).toMatchObject({
+        role: "tool",
+        content: [expect.objectContaining({
+          callId: "read-excluded",
+          isError: true,
+          result: expect.objectContaining({ ok: false, error: expect.objectContaining({ kind: "validation" }) }),
+        })],
+      });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("rejects a late skill read when no positive applicability cue matched", async () => {
+    const fixture = await repositoryFixture("unselected-skill-read");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), session: {
+        ...runnerStart(created.value, fixture.workspace).session,
+        objective: "Create src/services/external.js to fetch remote inventory for a legacy sync with a Bearer token",
+      } } });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [{
+          componentId: "component_storage", name: "storage-contracts", description: "Local storage app contracts", tags: ["storage"],
+          relevantPaths: ["src/domain/repository.js"],
+          appliesWhen: ["Building the no-auth locations-and-lots inventory app"],
+          doesNotApplyWhen: ["The project uses a different storage pattern or repository interface"],
+        }],
+      } } } });
+      const modelStart = await lines.next();
+      const modelStartId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      const route = modelRoute();
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: modelStartId, result: { ok: true, value: { streamId: "stream-unselected-skill", route } } } });
+      send({ kind: "kernel.event", event: { kind: "model.event", event: { kind: "completed", completion: {
+        ...modelCompletion(route), streamId: "stream-unselected-skill",
+        content: [{ kind: "tool-call", callId: "read-unselected", toolName: "skill.read", input: { componentId: "component_storage" } }],
+      } } } });
+      const retryModel = await lines.next();
+      expect(retryModel).toMatchObject({ message: { request: { kind: "model.start" } } });
+      const retryRequest = ((retryModel["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
+      expect((retryRequest["messages"] as readonly JsonObject[]).at(-1)).toMatchObject({
+        role: "tool",
+        content: [expect.objectContaining({
+          callId: "read-unselected",
+          isError: true,
+          result: expect.objectContaining({ ok: false, error: expect.objectContaining({ kind: "validation" }) }),
+        })],
+      });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("canonicalizes a model's string null before requesting a new-file write", async () => {
+    const fixture = await repositoryFixture("string-null-write");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    expect(runner).toBeDefined();
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const modelStart = await lines.next();
+      const modelStartId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      const route = modelRoute();
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: modelStartId, result: { ok: true, value: { streamId: "stream-string-null", route } } } });
+      send({
+        kind: "kernel.event",
+        event: {
+          kind: "model.event",
+          event: {
+            kind: "completed",
+            completion: {
+              ...modelCompletion(route),
+              streamId: "stream-string-null",
+              finishReason: "tool-calls",
+              content: [{
+                kind: "tool-call",
+                callId: "write-new-file",
+                toolName: "file.write",
+                input: { path: "src/new.ts", expectedSha: "null", content: "export const value = 1;\n" },
+              }],
+            },
+          },
+        },
+      });
+      await expect(lines.next()).resolves.toMatchObject({
+        message: {
+          kind: "runner.request",
+          request: {
+            kind: "file.write",
+            request: {
+              path: "src/new.ts",
+              expectedSha: null,
+              content: "export const value = 1;\n",
+            },
+          },
+        },
+      });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("canonicalizes legacy stdin input before requesting process control", async () => {
+    const fixture = await repositoryFixture("legacy-stdin-input");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    expect(runner).toBeDefined();
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    try {
+      send({ kind: "kernel.start", start: runnerStart(created.value, fixture.workspace) });
+      await lines.next();
+      const bootstrap = await lines.next();
+      const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      send({ kind: "kernel.reply", reply: { kind: "context.bootstrapped", requestId: bootstrapId, result: { ok: true, value: {
+        instructions: [], knowledgeCatalog: [], skillCatalog: [],
+      } } } });
+      const modelStart = await lines.next();
+      const modelStartId = ((modelStart["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+      const route = modelRoute();
+      send({ kind: "kernel.reply", reply: { kind: "model.started", requestId: modelStartId, result: { ok: true, value: { streamId: "stream-legacy-stdin", route } } } });
+      send({
+        kind: "kernel.event",
+        event: {
+          kind: "model.event",
+          event: {
+            kind: "completed",
+            completion: {
+              ...modelCompletion(route),
+              streamId: "stream-legacy-stdin",
+              finishReason: "tool-calls",
+              content: [{
+                kind: "tool-call",
+                callId: "process-input",
+                toolName: "process.input",
+                input: { processId: "process-1", input: { stdin: "" } },
+              }],
+            },
+          },
+        },
+      });
+      await expect(lines.next()).resolves.toMatchObject({
+        message: {
+          kind: "runner.request",
+          request: {
+            kind: "process.input",
+            processId: "process-1",
+            input: { kind: "data", encoding: "utf8", data: "" },
+          },
+        },
+      });
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  it("serves repeated immutable skill reads from the session cache", async () => {
+    const fixture = await repositoryFixture("skill-read-cache");
+    const created = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const runner = created.value.components.find((component) => component.kind === "runner");
+    if (runner === undefined) return;
+    const source = Buffer.from(runner.entrypoint.slice("inline-base64:".length), "base64").toString("utf8");
+    expect(source).toContain("doesNotApplyWhen");
+    expect(source).toContain("hard exclusion");
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["pipe", "pipe", "pipe"] });
+    const lines = lineReader(child.stdout);
+    const send = (message: JsonObject): void => {
+      child.stdin.write(`${JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message })}\n`);
+    };
+    send({ kind: "kernel.start", start: { ...runnerStart(created.value, fixture.workspace), session: {
+      ...runnerStart(created.value, fixture.workspace).session,
+      objective: "Make source changes and run the scoped verifier",
+    } } });
     await lines.next();
     const bootstrap = await lines.next();
     const bootstrapId = ((bootstrap["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
@@ -161,6 +672,23 @@ describe("harness runtime", () => {
         appliesWhen: ["Source changes"],
         doesNotApplyWhen: ["Documentation-only changes"],
       }],
+    } } } });
+    const preload = await lines.next();
+    expect(preload).toMatchObject({ message: { request: { kind: "skill.read", componentId: "component_verify" } } });
+    const preloadId = ((preload["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
+    send({ kind: "kernel.reply", reply: { kind: "skill.read", requestId: preloadId, result: { ok: true, value: {
+      componentId: "component_verify",
+      objectHash: "b".repeat(64),
+      catalog: {
+        componentId: "component_verify",
+        name: "verify-project",
+        description: "Run the scoped verifier",
+        tags: ["verify"],
+        relevantPaths: ["src"],
+        appliesWhen: ["Source changes"],
+        doesNotApplyWhen: ["Documentation-only changes"],
+      },
+      markdown: "# Verify project\n\nRun ./verify.\n",
     } } } });
     const firstModel = await lines.next();
     const firstModelId = ((firstModel["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
@@ -183,24 +711,6 @@ describe("harness runtime", () => {
         },
       },
     });
-    const skillRead = await lines.next();
-    expect(skillRead).toMatchObject({ message: { request: { kind: "skill.read", componentId: "component_verify" } } });
-    const skillReadId = ((skillRead["message"] as JsonObject)["request"] as JsonObject)["requestId"] as string;
-    send({ kind: "kernel.reply", reply: { kind: "skill.read", requestId: skillReadId, result: { ok: true, value: {
-      componentId: "component_verify",
-      objectHash: "b".repeat(64),
-      catalog: {
-        componentId: "component_verify",
-        name: "verify-project",
-        description: "Run the scoped verifier",
-        tags: ["verify"],
-        relevantPaths: ["src"],
-        appliesWhen: ["Source changes"],
-        doesNotApplyWhen: ["Documentation-only changes"],
-      },
-      markdown: "# Verify project\n\nRun ./verify.\n",
-    } } } });
-
     const next = await lines.next();
     expect(next).toMatchObject({ message: { request: { kind: "model.start" } } });
     const nextModelRequest = ((next["message"] as JsonObject)["request"] as JsonObject)["request"] as JsonObject;
@@ -238,6 +748,34 @@ describe("harness runtime", () => {
     expect(source).not.toContain('name:"file.read"');
     const active = await fixture.harnesses.getActiveHarness(fixture.project.id);
     expect(active.ok && active.value.id).toBe(initial.value.id);
+  });
+
+  it("upgrades only the built-in runner as a direct immutable descendant", async () => {
+    const fixture = await repositoryFixture("runner-upgrade");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    expect((await fixture.harnesses.putHarness(initial.value)).ok).toBe(true);
+    expect((await fixture.projects.compareAndSetActiveHarness(fixture.project.id, null, initial.value.id)).ok).toBe(true);
+    const legacy = await createMiniSweBaselineCandidate(initial.value, fixture.objects, fixture.harnesses);
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+
+    const upgraded = await createInitialRunnerUpgrade(legacy.value, fixture.objects, fixture.harnesses, NOW);
+    expect(upgraded.ok).toBe(true);
+    if (!upgraded.ok) return;
+    expect(upgraded.value.parents).toEqual([legacy.value.id]);
+    expect(upgraded.value.components.filter((component) => component.kind !== "runner")).toEqual(
+      legacy.value.components.filter((component) => component.kind !== "runner"),
+    );
+    expect(upgraded.value.components.find((component) => component.kind === "runner")?.id).toBe(
+      initial.value.components.find((component) => component.kind === "runner")?.id,
+    );
+    expect((await fixture.harnesses.getHarness(upgraded.value.id)).ok).toBe(true);
+
+    const repeated = await createInitialRunnerUpgrade(upgraded.value, fixture.objects, fixture.harnesses, NOW);
+    expect(repeated.ok).toBe(false);
+    expect(!repeated.ok && repeated.error).toMatchObject({ kind: "conflict", resource: "built-in-runner" });
   });
 
   it("runs the mini-swe baseline as a bash-only linear agent", async () => {
@@ -453,6 +991,8 @@ describe("harness runtime", () => {
     if (!started.ok) {
       return;
     }
+    expect(supervisor.runnerStartedSpecs).toHaveLength(1);
+    expect(supervisor.toolStartedSpecs).toHaveLength(0);
     expect(supervisor.startedSpecs[0]?.executable).toBe("node");
     expect(supervisor.startedSpecs[0]?.sandbox.filesystem).toBe("workspace-read-only");
     expect(supervisor.startedSpecs[0]?.sandbox.cpuTimeLimitMs).toBeLessThanOrEqual(1_800_000);
@@ -478,15 +1018,18 @@ describe("harness runtime", () => {
         },
       },
     }) + "\n");
-    const hostile = await received.next();
-    expect(hostile.value?.message.kind).toBe("runner.protocol-error");
+    const afterHostile = received.next();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(supervisor.stdin.join("")).toContain('"kind":"request.rejected"');
+    expect(supervisor.stdin.join("")).toContain('"requestId":"request-hostile"');
+    expect(supervisor.stdin.join("")).toContain('"field":"request"');
 
     supervisor.emit(JSON.stringify({
       protocol: "omega-runner-jsonl",
       version: 1,
       message: { kind: "runner.request", request: { kind: "harness.status", requestId: "request-pending", projectId: fixture.project.id } },
     }) + "\n");
-    expect((await received.next()).value?.message.kind).toBe("runner.request");
+    expect((await afterHostile).value?.message.kind).toBe("runner.request");
     const update = {
       protocol: "omega-runner-jsonl",
       version: 1,
@@ -549,6 +1092,20 @@ describe("harness runtime", () => {
     expect(partial.value?.message.kind).toBe("runner.protocol-error");
     await host.stop("session-runner" as SessionId, "test complete");
   });
+
+  it("accepts an OCI runner that becomes ready after the old one-second polling window", async () => {
+    const fixture = await repositoryFixture("slow-runner-ready");
+    const initial = await createInitialHarness(fixture.project, fixture.objects, fixture.projects);
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+
+    const supervisor = new FakeProcessSupervisor(120);
+    const host = createRunnerHost(supervisor, fixture.harnesses);
+    const started = await host.start(runnerStart(initial.value, fixture.workspace));
+
+    expect(started.ok).toBe(true);
+    expect(supervisor.observeCalls).toBeGreaterThanOrEqual(120);
+  });
 });
 
 class MemoryObjectStore implements ObjectStore {
@@ -587,6 +1144,8 @@ class MemoryObjectStore implements ObjectStore {
 class FakeProcessSupervisor implements ProcessSupervisor {
   readonly stdin: string[] = [];
   readonly startedSpecs: ProcessSpec[] = [];
+  readonly runnerStartedSpecs: ProcessSpec[] = [];
+  readonly toolStartedSpecs: ProcessSpec[] = [];
   readonly handle: ProcessHandle = {
     id: "process-runner" as ProcessId,
     state: "running",
@@ -601,14 +1160,30 @@ class FakeProcessSupervisor implements ProcessSupervisor {
     startedAt: NOW,
   };
   state: ProcessObservation["state"] = "running";
+  observeCalls = 0;
   private stdout = Buffer.alloc(0);
+  private pendingReady: string | null = null;
+
+  constructor(private readonly readyAfterObserveCalls = 0) {}
 
   async start(spec: ProcessSpec) {
     this.startedSpecs.push(spec);
+    this.toolStartedSpecs.push(spec);
+    return { ok: true as const, value: { ...this.handle, harnessId: spec.harnessId } };
+  }
+
+  async startRunner(spec: ProcessSpec) {
+    this.startedSpecs.push(spec);
+    this.runnerStartedSpecs.push(spec);
     return { ok: true as const, value: { ...this.handle, harnessId: spec.harnessId } };
   }
 
   async observe(_processId: ProcessId, after: readonly { readonly stream: "stdout" | "stderr"; readonly offset: ByteCount }[]) {
+    this.observeCalls += 1;
+    if (this.pendingReady !== null && this.observeCalls >= this.readyAfterObserveCalls) {
+      this.emit(this.pendingReady);
+      this.pendingReady = null;
+    }
     const offset = after.find((cursor) => cursor.stream === "stdout")?.offset ?? 0 as ByteCount;
     const data = this.stdout.subarray(offset);
     return {
@@ -636,7 +1211,9 @@ class FakeProcessSupervisor implements ProcessSupervisor {
         const message = parsed["message"] as JsonObject;
         const start = message["start"] as JsonObject;
         const harness = start["harness"] as JsonObject;
-        this.emit(JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "runner.ready", harnessId: harness["id"] } }) + "\n");
+        const ready = JSON.stringify({ protocol: "omega-runner-jsonl", version: 1, message: { kind: "runner.ready", harnessId: harness["id"] } }) + "\n";
+        if (this.readyAfterObserveCalls === 0) this.emit(ready);
+        else this.pendingReady = ready;
       }
     }
     return { ok: true as const, value: { acceptedBytes: 0 as ByteCount } };

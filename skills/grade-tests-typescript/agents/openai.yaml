@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grade TypeScript Tests"
+  short_description: "Mechanically grade TypeScript test quality"
+  default_prompt: "Use $grade-tests-typescript to grade this TypeScript test suite."

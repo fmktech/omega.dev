@@ -6,6 +6,7 @@ import type {
   CapabilityDeniedError,
   ChildSessionRecord,
   CreateRunnerProtocolDispatcher,
+  DurationMs,
   HarnessError,
   HarnessId,
   KernelToRunnerEnvelope,
@@ -24,6 +25,7 @@ import type {
   SessionId,
   Timestamp,
 } from "../contracts/index.js";
+import { readAllEvents } from "../sessions/handoffs.js";
 
 const PROTOCOL = "omega-runner-jsonl";
 const VERSION = 1;
@@ -106,9 +108,29 @@ export const createRunnerProtocolDispatcher: CreateRunnerProtocolDispatcher = (g
         break;
       }
       case "model.start": {
-        const result = request.request.sessionId === sessionId
-          ? await context.models.stream(request.request, capabilities)
-          : validationModel("Model request session does not match its runner", "request.sessionId");
+        let result;
+        if (request.request.sessionId !== sessionId) {
+          result = validationModel("Model request session does not match its runner", "request.sessionId");
+        } else {
+          const history = await readAllEvents(context.sessionRepository, sessionId);
+          if (!history.ok) {
+            result = modelLedgerFailure();
+          } else {
+            const usedCalls = history.value.filter((event) => event.payload.kind === "model.started").length;
+            const elapsedMs = Date.now() - Date.parse(String(capabilities.createdAt));
+            const remainingMs = Number(capabilities.wallTimeMs) - elapsedMs;
+            if (usedCalls >= capabilities.maxModelCalls) {
+              result = modelCallBudgetExceeded(capabilities.maxModelCalls, usedCalls + 1);
+            } else if (!Number.isFinite(elapsedMs) || remainingMs <= 0) {
+              result = modelWallTimeBudgetExceeded(Number(capabilities.wallTimeMs), elapsedMs);
+            } else {
+              result = await context.models.stream({
+                ...request.request,
+                abortAfterMs: Math.max(1, Math.min(Number(request.request.abortAfterMs), remainingMs)) as DurationMs,
+              }, capabilities);
+            }
+          }
+        }
         reply = {
           kind: "model.started",
           requestId: request.requestId,
@@ -426,6 +448,47 @@ type KernelEvent = Extract<KernelToRunnerEnvelope["message"], { readonly kind: "
 
 function kernelReply(reply: RunnerReply): KernelToRunnerEnvelope {
   return { protocol: PROTOCOL, version: VERSION, message: { kind: "kernel.reply", reply } };
+}
+
+function modelCallBudgetExceeded(limit: number, observed: number): Result<never, ModelError> {
+  return {
+    ok: false,
+    error: {
+      kind: "budget-exceeded",
+      budget: "model-calls",
+      limit,
+      observed,
+      recoverable: false,
+      callerAction: "abort",
+    },
+  };
+}
+
+function modelWallTimeBudgetExceeded(limit: number, observed: number): Result<never, ModelError> {
+  return {
+    ok: false,
+    error: {
+      kind: "budget-exceeded",
+      budget: "wall-time",
+      limit,
+      observed,
+      recoverable: false,
+      callerAction: "abort",
+    },
+  };
+}
+
+function modelLedgerFailure(): Result<never, ModelError> {
+  return {
+    ok: false,
+    error: {
+      kind: "protocol-error",
+      protocol: "session-jsonl",
+      message: "Unable to read the durable model-call budget ledger",
+      recoverable: false,
+      callerAction: "abort",
+    },
+  };
 }
 
 function kernelEvent(event: KernelEvent): KernelToRunnerEnvelope {

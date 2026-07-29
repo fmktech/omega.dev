@@ -30,7 +30,7 @@ const REQUEST_KINDS: ReadonlySet<string> = new Set([
   "artifact.read", "session.cancel", "policy.list", "policy.resolve", "evolution.start", "evolution.get",
   "evolution.list", "evolution.retry", "evolution.cancel", "benchmark.run-task", "benchmark.run-paired", "scorecard.get", "scorecard.list",
   "knowledge.catalog", "knowledge.read", "marketplace.search", "marketplace.transition", "harness.get",
-  "harness.list", "harness.rollback", "harness.pin",
+  "harness.list", "harness.upgrade-runner", "harness.rollback", "harness.pin",
 ]);
 
 class BoundaryFailure extends Error {
@@ -289,6 +289,9 @@ function parseClientRequest(text: string): ClientRequest {
     case "marketplace.search": validateMarketplaceQuery(request["query"]); break;
     case "knowledge.read": requireId(request["projectId"], "projectId"); requireId(request["documentId"], "documentId"); break;
     case "harness.get": requireId(request["harnessId"], "harnessId"); break;
+    case "harness.upgrade-runner":
+      requireId(request["projectId"], "projectId"); requireString(request["reason"], "reason");
+      break;
     case "harness.rollback":
     case "harness.pin":
       requireId(request["projectId"], "projectId"); requireId(request["targetHarnessId"], "targetHarnessId"); requireString(request["reason"], "reason");

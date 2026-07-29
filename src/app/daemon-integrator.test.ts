@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../config/defaults.js";
 import type {
   ArtifactId,
+  ArtifactRecord,
   AbsolutePath,
   ByteCount,
   ClientRequest,
@@ -20,15 +21,32 @@ import type {
   ProjectRepository,
   RequestId,
   SessionRecord,
+  SessionEvent,
   SessionId,
   Timestamp,
   WorkspaceId,
 } from "../contracts/index.js";
 import { startHttpServer } from "./http-server.js";
-import { createBenchmarkRunLauncher, ensureProjectHarness } from "./omega-app.js";
+import { countModelToolCalls, createBenchmarkRunLauncher, ensureProjectHarness } from "./omega-app.js";
 
 const TOKEN_NAME = String(DEFAULT_CONFIG.server.bearerTokenEnvName);
 const TOKEN = "daemon-test-token";
+
+it("counts persisted model tool calls across benchmark turns", () => {
+  const events = [
+    { payload: { kind: "model.completed", completion: { content: [
+      { kind: "text", text: "inspect" },
+      { kind: "tool-call", callId: "read-1", toolName: "file.read", input: {} },
+      { kind: "tool-call", callId: "read-2", toolName: "file.read", input: {} },
+    ] } } },
+    { payload: { kind: "process.started" } },
+    { payload: { kind: "model.completed", completion: { content: [
+      { kind: "tool-call", callId: "write-1", toolName: "file.write", input: {} },
+    ] } } },
+  ] as unknown as readonly SessionEvent[];
+
+  expect(countModelToolCalls(events)).toBe(3);
+});
 function success(request: ClientRequest): ClientResponse {
   return {
     requestId: request.requestId,
@@ -239,7 +257,7 @@ describe("trusted benchmark launcher", () => {
     const verifierHash = "verifier" as ObjectHash;
     const invariantHash = "invariants" as ObjectHash;
     const values = new Map<ObjectHash, Uint8Array>([
-      [fixtureHash, Buffer.from(JSON.stringify({ files: { "README.md": "candidate output" } }))],
+      [fixtureHash, Buffer.from(JSON.stringify({ files: { "README.md": "candidate output", "src/storage.js": "export const ready = true;\n" } }))],
       [verifierHash, Buffer.from(JSON.stringify({ checks: [{ path: "README.md", equals: "candidate output" }] }))],
       [invariantHash, Buffer.from(JSON.stringify({ checks: [{ path: "forbidden.txt", absent: true }] }))],
     ]);
@@ -321,6 +339,57 @@ describe("trusted benchmark launcher", () => {
     };
     const sessionRequests: string[] = [];
     const benchmarkRegistrations: string[] = [];
+    const recordedArtifacts: ArtifactRecord[] = [];
+    let verifierExitCode = 0;
+    const verifierCwds: string[] = [];
+    const processId = "process-verifier" as import("../contracts/index.js").ProcessId;
+    const emptyObject: ObjectDescriptor = {
+      hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" as ObjectHash,
+      size: 0 as ByteCount,
+      mediaType: "application/octet-stream",
+      createdAt: session.header.createdAt,
+    };
+    const verifierProcesses = {
+      async startRunner(spec: import("../contracts/index.js").ProcessSpec) {
+        verifierCwds.push(spec.cwd);
+        expect(spec.sandbox).toMatchObject({ filesystem: "workspace-read-only", network: "none" });
+        expect(await readFile(join(spec.cwd, "verify.mjs"), "utf8")).toContain("behavioral verifier");
+        expect(await readFile(join(spec.cwd, "src/storage.js"), "utf8")).toBe("export const ready = true;\n");
+        return {
+          ok: true as const,
+          value: {
+            id: processId,
+            state: "running" as const,
+            harnessId: spec.harnessId,
+            sandbox: {
+              backend: "docker" as const,
+              backendVersion: "test",
+              image: spec.sandbox.runtime.image,
+              imageDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as import("../contracts/index.js").Sha256,
+              containerUser: spec.sandbox.runtime.containerUser,
+            },
+            startedAt: session.header.createdAt,
+          },
+        };
+      },
+      async observe() {
+        return { ok: true as const, value: { processId, state: "exited" as const, slices: [], observedAt: session.header.createdAt } };
+      },
+      async cancel() {
+        return {
+          ok: true as const,
+          value: {
+            processId,
+            state: "exited" as const,
+            exitCode: verifierExitCode,
+            signal: null,
+            durationMs: 1 as import("../contracts/index.js").DurationMs,
+            stdout: emptyObject,
+            stderr: emptyObject,
+          },
+        };
+      },
+    };
     const launcher = createBenchmarkRunLauncher({
       root: root as AbsolutePath,
       objects,
@@ -337,8 +406,9 @@ describe("trusted benchmark launcher", () => {
       repository: {
         async get() { return { ok: true, value: session }; },
         async read() { return { ok: true, value: [] }; },
-        async recordArtifact(record) { return { ok: true, value: record }; },
+        async recordArtifact(record) { recordedArtifacts.push(record); return { ok: true, value: record }; },
       },
+      processes: verifierProcesses,
       config: DEFAULT_CONFIG,
     });
     try {
@@ -364,6 +434,65 @@ describe("trusted benchmark launcher", () => {
       expect(sessionRequests[0]).not.toContain(invariantHash);
       expect(sessionRequests[0]).not.toContain("private-secret-tag");
       expect(stored).toBeGreaterThanOrEqual(3);
+
+      values.set(verifierHash, Buffer.from(JSON.stringify({
+        checks: [{ path: "README.md", equals: "a source spelling the correct behavior does not require" }],
+        executable: {
+          files: { "verify.mjs": "// behavioral verifier\n" },
+          command: { executable: "node", args: ["verify.mjs"] },
+        },
+      })));
+      verifierExitCode = 0;
+      const equivalentImplementation = await launcher.execute(execution);
+      expect(equivalentImplementation, JSON.stringify(equivalentImplementation)).toMatchObject({ ok: true, value: { outcome: "passed" } });
+      expect(verifierCwds).toHaveLength(1);
+      await expect(readFile(join(verifierCwds[0]!, "verify.mjs"), "utf8")).rejects.toThrow();
+      const executablePassReport = recordedArtifacts.filter((artifact) => artifact.kind === "benchmark-report").at(-1);
+      expect(executablePassReport).toBeDefined();
+      if (executablePassReport !== undefined) {
+        const reportBytes = values.get(executablePassReport.object.hash);
+        expect(JSON.parse(Buffer.from(reportBytes ?? []).toString("utf8"))).toMatchObject({
+          verifierPassed: true,
+          verifierDiagnostics: [{ operator: "execute", passed: true }],
+          structuralDiagnostics: [{ operator: "equals", passed: false }],
+        });
+      }
+
+      values.set(verifierHash, Buffer.from(JSON.stringify({
+        checks: [{ path: "README.md", equals: "candidate output" }],
+        executable: {
+          files: { "README.md": "verifier must not replace candidate output\n" },
+          command: { executable: "node", args: ["README.md"] },
+        },
+      })));
+      const verifierCollision = await launcher.execute(execution);
+      expect(verifierCollision).toMatchObject({ ok: false, error: { kind: "validation", field: "verifier.executable.files" } });
+
+      values.set(verifierHash, Buffer.from(JSON.stringify({
+        checks: [{ path: "README.md", equals: "candidate output" }],
+        executable: {
+          files: { "verify.mjs": "// behavioral verifier rejects comment-only implementation\n" },
+          command: { executable: "node", args: ["verify.mjs"] },
+        },
+      })));
+      verifierExitCode = 1;
+      const commentOnlyFalsePositive = await launcher.execute(execution);
+      expect(commentOnlyFalsePositive).toMatchObject({ ok: true, value: { outcome: "failed" } });
+
+      values.set(invariantHash, Buffer.from(JSON.stringify({
+        checks: [{ path: "README.md", notContains: "candidate" }],
+      })));
+      const violatedNegativeContent = await launcher.execute(execution);
+      expect(violatedNegativeContent).toMatchObject({ ok: true, value: { outcome: "failed" } });
+      const failedReport = recordedArtifacts.filter((artifact) => artifact.kind === "benchmark-report").at(-1);
+      expect(failedReport).toBeDefined();
+      if (failedReport !== undefined) {
+        const reportBytes = values.get(failedReport.object.hash);
+        expect(reportBytes).toBeDefined();
+        expect(JSON.parse(Buffer.from(reportBytes ?? []).toString("utf8"))).toMatchObject({
+          invariantDiagnostics: [{ path: "README.md", operator: "notContains", expected: "candidate", actual: "present", passed: false }],
+        });
+      }
 
       const pending: SessionRecord = { ...session, state: "running", completedAt: null, outcome: null };
       const benchmarkStarted = Promise.withResolvers<void>();
@@ -397,12 +526,44 @@ describe("trusted benchmark launcher", () => {
       const aborted = await running;
       expect(aborted).toMatchObject({ ok: false, error: { field: "signal" } });
       expect(cancellationReasons).toEqual(["benchmark evaluation cancelled"]);
+
+      const observerFailureCancellations: string[] = [];
+      const observerFailureLauncher = createBenchmarkRunLauncher({
+        root: root as AbsolutePath,
+        objects,
+        projects: {
+          async registerBenchmarkWorkspace(_requestedProjectId, path) {
+            return { ok: true, value: { id: pending.header.workspaceId, projectId, path, registeredAt: pending.header.createdAt, lastSeenAt: pending.header.createdAt } };
+          },
+        },
+        sessions: {
+          async startBenchmarkTask() { return { ok: true, value: pending }; },
+          async cancel(_sessionId, reason) {
+            observerFailureCancellations.push(reason);
+            return { ok: true, value: { ...pending, state: "cancelled", completedAt: pending.header.createdAt, outcome: "cancelled" } };
+          },
+        },
+        repository: {
+          async get() {
+            return {
+              ok: false,
+              error: { kind: "not-found", resource: "session", id: pending.header.id, recoverable: false, callerAction: "propagate" },
+            } as const;
+          },
+          async read() { return { ok: true, value: [] }; },
+          async recordArtifact(record) { return { ok: true, value: record }; },
+        },
+        config: DEFAULT_CONFIG,
+      });
+      const observerFailure = await observerFailureLauncher.execute(execution);
+      expect(observerFailure).toMatchObject({ ok: false, error: { kind: "not-found" } });
+      expect(observerFailureCancellations).toEqual(["benchmark launcher failed after session start"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 });
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

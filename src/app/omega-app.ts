@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -8,6 +8,7 @@ import type {
   ApiError,
   ArtifactId,
   ArtifactRecord,
+  ByteCount,
   BenchmarkMetrics,
   BenchmarkExecutionRequest,
   BenchmarkRunLauncher,
@@ -26,7 +27,10 @@ import type {
   ObjectStore,
   ProjectRepository,
   ProjectRecord,
+  ProcessSpec,
+  ProcessSupervisor,
   SessionRepository,
+  SessionRecord,
   SessionEvent,
   SessionService,
   SkillEvalPrivateTask,
@@ -46,7 +50,7 @@ import { createEvolutionService } from "../evolution/evolution-service.js";
 import { createContextService } from "../context/context-service.js";
 import { createHarnessActivationService } from "../harness/activation-service.js";
 import { createHarnessRepository } from "../harness/harness-repository.js";
-import { createInitialHarness } from "../harness/initial-harness.js";
+import { createInitialHarness, createInitialRunnerUpgrade } from "../harness/initial-harness.js";
 import { createRunnerHost } from "../harness/runner-host.js";
 import { createKnowledgeService } from "../knowledge/knowledge-service.js";
 import { createMarketplaceService } from "../knowledge/marketplace-service.js";
@@ -161,10 +165,36 @@ export type BenchmarkLauncherDependencies = {
   readonly projects: Pick<ProjectRepository, "registerBenchmarkWorkspace">;
   readonly sessions: Pick<SessionService, "startBenchmarkTask" | "cancel">;
   readonly repository: Pick<SessionRepository, "get" | "read" | "recordArtifact">;
+  readonly processes?: Pick<ProcessSupervisor, "startRunner" | "observe" | "cancel">;
   readonly config: OmegaContext["config"];
 };
 
-type Check = { readonly path: string; readonly equals?: string; readonly contains?: string; readonly absent?: boolean };
+type Check = {
+  readonly path: string;
+  readonly equals?: string;
+  readonly contains?: string;
+  readonly notContains?: string;
+  readonly absent?: boolean;
+};
+
+type CheckDiagnostic = {
+  readonly index: number;
+  readonly path: string;
+  readonly passed: boolean;
+  readonly operator: "equals" | "contains" | "notContains" | "absent" | "invalid" | "execute";
+  readonly expected: string | boolean | null;
+  readonly actual: string;
+};
+
+type ExecutableVerifier = {
+  readonly files: Readonly<Record<string, string>>;
+  readonly command: { readonly executable: string; readonly args: readonly string[] };
+};
+
+type ParsedVerifier = {
+  readonly checks: readonly Check[];
+  readonly executable: ExecutableVerifier | null;
+};
 
 function launcherIo(operation: string): EvolutionError {
   return { kind: "io-error", operation, code: null, recoverable: false, callerAction: "propagate" };
@@ -251,6 +281,7 @@ function parseChecks(bytes: Uint8Array, label: string): Result<readonly Check[],
       path: value["path"],
       ...(typeof value["equals"] === "string" ? { equals: value["equals"] } : {}),
       ...(typeof value["contains"] === "string" ? { contains: value["contains"] } : {}),
+      ...(typeof value["notContains"] === "string" ? { notContains: value["notContains"] } : {}),
       ...(typeof value["absent"] === "boolean" ? { absent: value["absent"] } : {}),
     };
     checks.push(check);
@@ -258,17 +289,203 @@ function parseChecks(bytes: Uint8Array, label: string): Result<readonly Check[],
   return { ok: true, value: checks };
 }
 
-async function runChecks(workspace: string, checks: readonly Check[]): Promise<boolean> {
-  for (const check of checks) {
+function parseVerifier(bytes: Uint8Array): Result<ParsedVerifier, EvolutionError> {
+  const checks = parseChecks(bytes, "Benchmark verifier");
+  if (!checks.ok) return checks;
+  const parsed = parseRecord(bytes, "Benchmark verifier");
+  if (!parsed.ok) return parsed;
+  if (!recordValue(parsed.value)) return { ok: true, value: { checks: checks.value, executable: null } };
+  const raw = parsed.value["executable"];
+  if (raw === undefined) return { ok: true, value: { checks: checks.value, executable: null } };
+  if (!recordValue(raw)) {
+    return { ok: false, error: { kind: "validation", message: "Benchmark executable verifier has an invalid shape", field: "verifier.executable", recoverable: true, callerAction: "fix-request" } };
+  }
+  const rawFiles = raw["files"];
+  const rawCommand = raw["command"];
+  if (rawFiles === undefined || rawCommand === undefined || !recordValue(rawFiles) || !recordValue(rawCommand)) {
+    return { ok: false, error: { kind: "validation", message: "Benchmark executable verifier has an invalid shape", field: "verifier.executable", recoverable: true, callerAction: "fix-request" } };
+  }
+  const entries = Object.entries(rawFiles);
+  const executable = rawCommand["executable"];
+  const args = rawCommand["args"];
+  let totalBytes = 0;
+  const files: Record<string, string> = {};
+  if (entries.length === 0 || entries.length > 4 || typeof executable !== "string" || executable.length === 0
+    || executable.length > 128 || executable.includes("\0") || executable.includes("/")
+    || !Array.isArray(args) || args.length > 32
+    || args.some((arg) => typeof arg !== "string" || arg.length > 1_024 || arg.includes("\0"))) {
+    return { ok: false, error: { kind: "validation", message: "Benchmark executable verifier exceeds its command or file bounds", field: "verifier.executable", recoverable: true, callerAction: "fix-request" } };
+  }
+  for (const [path, content] of entries) {
+    if (typeof content !== "string" || path.length === 0 || path.length > 240 || path.startsWith("/") || path.includes("\\")
+      || path.split("/").some((part) => part.length === 0 || part === "." || part === ".." || part === ".git")) {
+      return { ok: false, error: { kind: "validation", message: "Benchmark executable verifier contains an unsafe file", field: "verifier.executable.files", recoverable: true, callerAction: "fix-request" } };
+    }
+    totalBytes += Buffer.byteLength(content);
+    if (Buffer.byteLength(content) > 64 * 1024 || totalBytes > 64 * 1024) {
+      return { ok: false, error: { kind: "validation", message: "Benchmark executable verifier exceeds its byte budget", field: "verifier.executable.files", recoverable: true, callerAction: "fix-request" } };
+    }
+    files[path] = content;
+  }
+  return { ok: true, value: { checks: checks.value, executable: { files, command: { executable, args: args as readonly string[] } } } };
+}
+
+async function runExecutableVerifier(
+  options: BenchmarkLauncherDependencies,
+  workspace: AbsolutePath,
+  sessionId: SessionRecord["header"]["id"],
+  harnessId: HarnessManifest["id"],
+  verifier: ExecutableVerifier,
+  signal?: AbortSignal,
+): Promise<Result<{ readonly passed: boolean; readonly diagnostics: readonly CheckDiagnostic[] }, EvolutionError>> {
+  if (options.processes === undefined) {
+    return { ok: false, error: { kind: "validation", message: "No isolated process supervisor is configured for the executable verifier", field: "verifier.executable", recoverable: true, callerAction: "fix-request" } };
+  }
+  let verifierRoot: string | null = null;
+  try {
+    const snapshotEntries = await readdir(workspace);
+    verifierRoot = await mkdtemp(join(workspace, ".omega-verifier-"));
+    for (const entry of snapshotEntries) {
+      await cp(join(workspace, entry), join(verifierRoot, entry), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true,
+      });
+    }
+    for (const [path, content] of Object.entries(verifier.files)) {
+      const target = resolve(verifierRoot, path);
+      if (relative(verifierRoot, target).startsWith("..")) return { ok: false, error: launcherIo("materialize-executable-verifier") };
+      const collision = await lstat(target).then(() => true, (error: unknown) => {
+        if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+        throw error;
+      });
+      if (collision) {
+        return { ok: false, error: { kind: "validation", message: "Benchmark verifier files must not replace completed workspace files", field: "verifier.executable.files", recoverable: true, callerAction: "fix-request" } };
+      }
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, content, "utf8");
+    }
+    const timeoutMs = 30_000 as DurationMs;
+    const capabilities: CapabilityEnvelope = {
+      grants: [],
+      modelRoles: [],
+      maxCostUsdMicros: 0 as UsdMicros,
+      maxModelCalls: 0,
+      maxProcessStarts: 0,
+      maxInputTokens: 0 as TokenCount,
+      maxOutputTokens: 0 as TokenCount,
+      wallTimeMs: timeoutMs,
+      createdAt: timestamp(),
+    };
+    const spec: ProcessSpec = {
+      executable: verifier.command.executable,
+      args: verifier.command.args,
+      cwd: verifierRoot as AbsolutePath,
+      credentialEnvNames: [],
+      stdin: "closed",
+      timeoutMs,
+      sandbox: {
+        filesystem: "workspace-read-only",
+        network: "none",
+        allowedHosts: [],
+        memoryLimitBytes: (512 * 1024 * 1024) as ByteCount,
+        cpuTimeLimitMs: timeoutMs,
+        runtime: {
+          kind: "oci",
+          image: options.config.processes.defaultImage,
+          expectedImageDigest: null,
+          containerUser: options.config.processes.defaultContainerUser,
+          workspaceMountPath: options.config.processes.workspaceMountPath,
+        },
+      },
+      harnessId,
+      sessionId,
+    };
+    const started = await options.processes.startRunner(spec, capabilities);
+    if (!started.ok) return { ok: false, error: launcherIo("start-executable-verifier") };
+    let stdoutOffset = 0;
+    let stderrOffset = 0;
+    let stdout = "";
+    let stderr = "";
+    for (;;) {
+      if (benchmarkAborted(signal)) {
+        await options.processes.cancel(started.value.id, "benchmark evaluation cancelled");
+        return launcherCancelled();
+      }
+      const observed = await options.processes.observe(started.value.id, [
+        { stream: "stdout", offset: stdoutOffset as ByteCount },
+        { stream: "stderr", offset: stderrOffset as ByteCount },
+      ]);
+      if (!observed.ok) return { ok: false, error: launcherIo("observe-executable-verifier") };
+      for (const slice of observed.value.slices) {
+        if (slice.stream === "stdout") {
+          stdoutOffset = Number(slice.range.endExclusive);
+          if (stdout.length < 8_192) stdout += slice.data.slice(0, 8_192 - stdout.length);
+        } else {
+          stderrOffset = Number(slice.range.endExclusive);
+          if (stderr.length < 8_192) stderr += slice.data.slice(0, 8_192 - stderr.length);
+        }
+      }
+      if (observed.value.state === "running" || observed.value.state === "starting") {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        continue;
+      }
+      const completion = await options.processes.cancel(started.value.id, "collect completed executable verifier");
+      if (!completion.ok) return { ok: false, error: launcherIo("complete-executable-verifier") };
+      const passed = completion.value.state === "exited" && completion.value.exitCode === 0;
+      return {
+        ok: true,
+        value: {
+          passed,
+          diagnostics: [{
+            index: 0,
+            path: ".omega-verifier",
+            passed,
+            operator: "execute",
+            expected: "exit 0",
+            actual: JSON.stringify({ state: completion.value.state, exitCode: completion.value.exitCode, stdout, stderr }),
+          }],
+        },
+      };
+    }
+  } catch {
+    return { ok: false, error: launcherIo("execute-benchmark-verifier") };
+  } finally {
+    if (verifierRoot !== null) await rm(verifierRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function runChecks(workspace: string, checks: readonly Check[]): Promise<{ readonly passed: boolean; readonly diagnostics: readonly CheckDiagnostic[] }> {
+  const diagnostics: CheckDiagnostic[] = [];
+  for (const [index, check] of checks.entries()) {
     const target = resolve(workspace, check.path);
-    if (relative(workspace, target).startsWith("..")) return false;
+    if (relative(workspace, target).startsWith("..")) {
+      diagnostics.push({ index, path: check.path, passed: false, operator: "invalid", expected: null, actual: "missing" });
+      continue;
+    }
     let content: string | null;
     try { content = await readFile(target, "utf8"); } catch { content = null; }
-    if (check.absent === true) { if (content !== null) return false; continue; }
-    if (content === null || (check.equals !== undefined && content !== check.equals)
-      || (check.contains !== undefined && !content.includes(check.contains))) return false;
+    const actual = content === null ? "missing" : "present";
+    if (check.absent === true) {
+      diagnostics.push({ index, path: check.path, passed: content === null, operator: "absent", expected: true, actual });
+      continue;
+    }
+    if (check.equals !== undefined) {
+      diagnostics.push({ index, path: check.path, passed: content === check.equals, operator: "equals", expected: check.equals, actual });
+      continue;
+    }
+    if (check.contains !== undefined) {
+      diagnostics.push({ index, path: check.path, passed: content !== null && content.includes(check.contains), operator: "contains", expected: check.contains, actual });
+      continue;
+    }
+    if (check.notContains !== undefined) {
+      diagnostics.push({ index, path: check.path, passed: content !== null && !content.includes(check.notContains), operator: "notContains", expected: check.notContains, actual });
+      continue;
+    }
+    diagnostics.push({ index, path: check.path, passed: false, operator: "invalid", expected: null, actual });
   }
-  return true;
+  return { passed: diagnostics.every((item) => item.passed), diagnostics };
 }
 
 async function putArtifact(
@@ -314,6 +531,12 @@ function zeroMetrics(verifierPassed: boolean, negativeInvariantsPassed: boolean,
     harnessUpdates: 0,
     skillReads: 0,
   };
+}
+
+export function countModelToolCalls(events: readonly SessionEvent[]): number {
+  return events.reduce((count, event) => event.payload.kind !== "model.completed"
+    ? count
+    : count + event.payload.completion.content.filter((part) => part.kind === "tool-call").length, 0);
 }
 
 async function observedBenchmark(
@@ -366,6 +589,7 @@ async function observedBenchmark(
           ? null
           : Math.max(0, Date.parse(firstToken.firstTokenAt) - Date.parse(firstToken.startedAt)) as DurationMs,
         modelTurns: completions.length,
+        toolCalls: countModelToolCalls(events),
         processStarts: events.filter((event) => event.payload.kind === "process.started").length,
         policyAllows: events.filter((event) => event.payload.kind === "policy.decided" && event.payload.decision.outcome === "allow").length,
         policyDenials: events.filter((event) => event.payload.kind === "policy.decided" && event.payload.decision.outcome === "deny").length,
@@ -443,9 +667,14 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
         });
         if (!session.ok) return session;
         let terminal = session.value;
+        let cancellationAttempted = false;
+        const cancelSession = (reason: string): ReturnType<typeof options.sessions.cancel> => {
+          cancellationAttempted = true;
+          return options.sessions.cancel(terminal.header.id, reason);
+        };
         let abortCancellation: ReturnType<typeof options.sessions.cancel> | null = null;
         const cancelForAbort = (): ReturnType<typeof options.sessions.cancel> => {
-          abortCancellation ??= options.sessions.cancel(terminal.header.id, "benchmark evaluation cancelled");
+          abortCancellation ??= cancelSession("benchmark evaluation cancelled");
           return abortCancellation;
         };
         const onAbort = (): void => { void cancelForAbort(); };
@@ -475,7 +704,7 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
           return launcherCancelled();
         }
         if (terminal.outcome === null) {
-          const cancelled = await options.sessions.cancel(terminal.header.id, "benchmark wall-time budget exceeded");
+          const cancelled = await cancelSession("benchmark wall-time budget exceeded");
           if (!cancelled.ok) {
             switch (cancelled.error.kind) {
               case "policy-denied":
@@ -489,17 +718,38 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
           }
           terminal = cancelled.value;
         }
-        const verifierChecks = parseChecks(verifier.value, "Benchmark verifier");
-        if (!verifierChecks.ok) return verifierChecks;
+        const verifierPlan = parseVerifier(verifier.value);
+        if (!verifierPlan.ok) return verifierPlan;
         const invariantChecks = parseChecks(negativeInvariants.value, "Benchmark negative invariants");
         if (!invariantChecks.ok) return invariantChecks;
-        const verifierPassed = terminal.outcome === "succeeded" && await runChecks(materialized.value, verifierChecks.value);
-        const negativeInvariantsPassed = await runChecks(materialized.value, invariantChecks.value);
+        const structuralResult = await runChecks(materialized.value, verifierPlan.value.checks);
+        const executableResult = verifierPlan.value.executable === null
+          ? null
+          : await runExecutableVerifier(
+            options,
+            materialized.value,
+            terminal.header.id,
+            request.harness.id,
+            verifierPlan.value.executable,
+            signal,
+          );
+        if (executableResult !== null && !executableResult.ok) return executableResult;
+        const verifierResult = executableResult?.value ?? structuralResult;
+        const invariantResult = await runChecks(materialized.value, invariantChecks.value);
+        const verifierPassed = terminal.outcome === "succeeded" && verifierResult.passed;
+        const negativeInvariantsPassed = invariantResult.passed;
         const completedAt = timestamp();
         const outcome = verifierPassed && negativeInvariantsPassed ? "passed" : terminal.outcome === "cancelled" ? "budget-exceeded" : "failed";
         const diff = await putArtifact(options, terminal.header.id, "workspace-snapshot", { outcome, files: (await readdir(materialized.value, { recursive: true })).filter((path) => !path.startsWith(".git")) });
         if (!diff.ok) return diff;
-        const report = await putArtifact(options, terminal.header.id, "benchmark-report", { outcome, verifierPassed, negativeInvariantsPassed });
+        const report = await putArtifact(options, terminal.header.id, "benchmark-report", {
+          outcome,
+          verifierPassed,
+          negativeInvariantsPassed,
+          verifierDiagnostics: verifierResult.diagnostics,
+          structuralDiagnostics: structuralResult.diagnostics,
+          invariantDiagnostics: invariantResult.diagnostics,
+        });
         if (!report.ok) return report;
         const policyObject = await options.objects.put("application/vnd.omega.policy+json", (async function* (): AsyncIterable<Uint8Array> { yield encoder.encode(JSON.stringify(options.config.policy)); })());
         if (!policyObject.ok) return policyObject;
@@ -533,6 +783,9 @@ export function createBenchmarkRunLauncher(options: BenchmarkLauncherDependencie
         };
         } finally {
           signal?.removeEventListener("abort", onAbort);
+          if (terminal.outcome === null && !cancellationAttempted) {
+            await cancelSession("benchmark launcher failed after session start").catch(() => undefined);
+          }
         }
       } catch {
         return { ok: false, error: launcherIo("execute-benchmark") };
@@ -577,7 +830,7 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     runners,
   });
   const marketplace = createMarketplaceService({ root, objects, harnesses, activation });
-  const launcher = createBenchmarkRunLauncher({ root, objects, projects, sessions, repository: sessionRepository, config });
+  const launcher = createBenchmarkRunLauncher({ root, objects, projects, sessions, repository: sessionRepository, processes: runtime.processes, config });
   const benchmarks = createBenchmarkService({ root, objects, sessions, harnesses, activation, launcher });
   const evolution = createEvolutionService({
     root,
@@ -587,6 +840,7 @@ function createContext(config: Parameters<CreateOmegaApplication>[0], environmen
     harnesses,
     benchmarks,
     activation,
+    syntheticSkillTaskBudget: config.benchmarks.syntheticSkillTaskBudget,
   });
   context = {
     config,
@@ -720,6 +974,13 @@ async function execute(context: OmegaContext, request: ClientRequest): Promise<C
       return response(context, request, await context.harnesses.getHarness(request.harnessId), (harness) => ({ kind: "harness", harness }));
     case "harness.list":
       return response(context, request, await context.harnesses.listProjectHarnesses(request.projectId, request.page), (page) => ({ kind: "harnesses", page }));
+    case "harness.upgrade-runner": {
+      const active = await context.harnesses.getActiveHarness(request.projectId);
+      if (!active.ok) return errorResponse(context, request, active.error);
+      const candidate = await createInitialRunnerUpgrade(active.value, context.objects, context.harnesses, timestamp());
+      if (!candidate.ok) return errorResponse(context, request, candidate.error);
+      return response(context, request, await context.activation.pin(request.projectId, candidate.value.id, request.reason), (update) => ({ kind: "harness-update", update }));
+    }
     case "harness.rollback":
       return response(context, request, await context.activation.rollback(request.projectId, request.targetHarnessId, request.reason), (update) => ({ kind: "harness-update", update }));
     case "harness.pin":

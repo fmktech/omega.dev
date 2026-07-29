@@ -47,6 +47,7 @@ Governance
   resolve-policy <escalation-id> <allow|deny> <reason...>
   harness <harness-id>
   harnesses <project-id> [cursor] [limit]
+  upgrade-runner <project-id> <reason...>
   pin-harness <project-id> <harness-id> <reason...>
   rollback-harness <project-id> <harness-id> <reason...>
 
@@ -175,6 +176,7 @@ function createRequest(argv: readonly string[]): ClientRequest {
     }
     case "harness": return { kind: "harness.get", requestId: id, harnessId: required(argv, 1, "harness ID") as HarnessId };
     case "harnesses": return { kind: "harness.list", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, page: page(argv, 2) };
+    case "upgrade-runner": return { kind: "harness.upgrade-runner", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, reason: reason(argv, 2) };
     case "rollback-harness": return { kind: "harness.rollback", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, targetHarnessId: required(argv, 2, "harness ID") as HarnessId, reason: reason(argv, 3) };
     case "pin-harness": return { kind: "harness.pin", requestId: id, projectId: required(argv, 1, "project ID") as ProjectId, targetHarnessId: required(argv, 2, "harness ID") as HarnessId, reason: reason(argv, 3) };
     default: throw new Error(`Unknown command: ${command}`);

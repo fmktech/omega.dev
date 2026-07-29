@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ComponentId } from "../contracts/index.js";
 import {
+  OPERATIONAL_INTERNALIZATION_SCENARIOS,
   WORKSPACE_SKILL_SCENARIOS,
   assessWorkspaceEfficiency,
   renderWorkspaceSkillPrompt,
@@ -81,6 +82,53 @@ describe("workspace skill transfer benchmark", () => {
       incumbentToolCalls: 100,
       candidateToolCalls: 70,
     }).effectMet).toBe(false);
+  });
+
+  it("distinguishes first-action macOS application from recovery after the wrong command", () => {
+    const scenario = OPERATIONAL_INTERNALIZATION_SCENARIOS[0]!;
+    const applied = scoreWorkspaceSkillRun(scenario, {
+      condition: "candidate",
+      installedComponentIds: [skillId],
+      skillReadComponentIds: [skillId],
+      fileWrites: ["config/service.toml"],
+      processCalls: ["./tools/render-config", "gtimeout 10 sh verify-auth"],
+      finalFiles: fixtureFiles(scenario.expected),
+    });
+    const recovered = scoreWorkspaceSkillRun(scenario, {
+      condition: "candidate",
+      installedComponentIds: [skillId],
+      skillReadComponentIds: [skillId],
+      fileWrites: ["config/service.toml"],
+      processCalls: ["./tools/render-config", "timeout 10 ./verify-auth", "gtimeout 10 ./verify-auth"],
+      finalFiles: fixtureFiles(scenario.expected),
+    });
+
+    expect(applied).toMatchObject({ workspacePassed: true, retrievalCorrect: true, closedLoopPassed: true });
+    expect(recovered.checks["forbiddenProcessAvoided"]).toBe(false);
+    expect(recovered.workspacePassed).toBe(false);
+  });
+
+  it("keeps the macOS skill inactive on the Linux negative control", () => {
+    const scenario = OPERATIONAL_INTERNALIZATION_SCENARIOS[2]!;
+    const inhibited = scoreWorkspaceSkillRun(scenario, {
+      condition: "candidate",
+      installedComponentIds: [skillId],
+      skillReadComponentIds: [],
+      fileWrites: ["config/service.toml"],
+      processCalls: ["./tools/render-config", "timeout 10 ./verify-auth"],
+      finalFiles: fixtureFiles(scenario.expected),
+    });
+    const leaked = scoreWorkspaceSkillRun(scenario, {
+      condition: "candidate",
+      installedComponentIds: [skillId],
+      skillReadComponentIds: [skillId],
+      fileWrites: ["config/service.toml"],
+      processCalls: ["./tools/render-config", "gtimeout 10 ./verify-auth"],
+      finalFiles: fixtureFiles(scenario.expected),
+    });
+
+    expect(inhibited).toMatchObject({ workspacePassed: true, retrievalCorrect: true, closedLoopPassed: true });
+    expect(leaked).toMatchObject({ workspacePassed: false, retrievalCorrect: false, closedLoopPassed: false });
   });
 
   it("never reports positive transfer from a partial benchmark", () => {

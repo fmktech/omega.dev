@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type {
   ArtifactId,
   CapabilityEnvelope,
-  CapabilityGrant,
   ComponentId,
   ComponentKind,
   ComponentManifest,
@@ -106,39 +105,73 @@ function pageFrom(items: readonly EvolutionJob[], page: PageRequest): Result<Pag
 }
 
 function evolutionObjective(request: EvolutionRequest): string {
+  const allowedSourceIds = [request.sourceSessionId, ...request.evidenceArtifactIds];
+  const canonicalSkillReflection = request.evaluationMode === "synthetic-skill-suite"
+    && request.allowedComponentKinds.length === 1
+    && request.allowedComponentKinds[0] === "skill";
   const exampleKind = request.allowedComponentKinds[0] ?? "skill";
   const exampleRuntime = exampleKind === "runner" ? "node" : "document";
   const exampleEntrypoint = exampleKind === "runner" ? "runner.js" : "SKILL.md";
+  const evidenceInstruction = request.evidenceArtifactIds.length === 0
+    ? "No additional evidence artifacts were supplied. The completed source session and the goal above are the complete evidence. Do not call artifact.read or any discovery tool."
+    : `Read only these supplied evidence artifacts with artifact.read before proposing a mutation: ${request.evidenceArtifactIds.join(", ")}.`;
+  const proposalToolInstruction = request.evidenceArtifactIds.length === 0
+    ? "This is a proposal-only child: every tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response."
+    : "This is a proposal-only child: after the supplied artifact.read calls, every other tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response.";
+  const mutationFormatInstructions = canonicalSkillReflection
+    ? [
+      "You must return the reflection JSON described below as the entire final response, with no prose or code fence.",
+      "Raw component deltas and hand-authored SKILL.md documents are invalid for synthetic skill evolution because they bypass canonical catalog and contract validation.",
+    ]
+    : [
+      "Return the proposed harness mutation as the entire final response in this JSON shape, with no prose or code fence:",
+      JSON.stringify({ kind: exampleKind, runtime: exampleRuntime, entrypoint: exampleEntrypoint, content: "...", replaceComponentId: null }),
+      `Allowed component kinds: ${request.allowedComponentKinds.join(", ")}.`,
+      "Use replaceComponentId to replace an existing component; omit it or use null to add a non-singleton component.",
+      "For a runner mutation, content is the complete executable runner artifact, not the TypeScript factory that embeds it.",
+      "The content must be complete executable or document content, not a patch or description of the change.",
+    ];
   const instructions = [
     request.goal,
-    `Read the supplied evidence with artifact.read before proposing a mutation. Evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
+    evidenceInstruction,
     "Work under a strict synthesis budget. Inspect only the minimum named incumbent source needed, at most once per file. Do not inspect benchmark implementations, verifier assets, prior scorecards, or broad contracts.",
-    "This is a proposal-only child: after the single necessary file.read, every tool is unavailable and forbidden. Never call file.write or process.start, and never try to save or validate the component in the workspace; return it directly in the final response.",
+    proposalToolInstruction,
+    "Treat exact signatures, parameter order, identifiers, paths, commands, constants, error codes, and literal values in the goal or evidence as authoritative contracts. Copy them verbatim. Before returning, audit the proposal against every such exact contract; never paraphrase, reorder, generalize, or rename them.",
     "Make the smallest complete mutation that addresses the supplied evidence. Do not repeatedly restate or plan the solution.",
-    "Return the proposed harness mutation as the entire final response in this JSON shape, with no prose or code fence:",
-    JSON.stringify({ kind: exampleKind, runtime: exampleRuntime, entrypoint: exampleEntrypoint, content: "...", replaceComponentId: null }),
-    `Allowed component kinds: ${request.allowedComponentKinds.join(", ")}.`,
-    "Use replaceComponentId to replace an existing component; omit it or use null to add a non-singleton component.",
-    "For a runner mutation, content is the complete executable runner artifact, not the TypeScript factory that embeds it.",
-    "The content must be complete executable or document content, not a patch or description of the change.",
+    ...mutationFormatInstructions,
   ];
   if (request.allowedComponentKinds.includes("skill")) {
     instructions.push(
-      "When the evidence is a completed project conversation, reflect before mutating. If it establishes a repeatable procedure, you may return the reflection JSON shape below instead of a component delta; the daemon will atomically compile each skill lesson together with every related knowledge, runner, tool, and policy lesson into a canonical project skill bundle. Choose no-change when the behavior was temporary or unsupported.",
+      canonicalSkillReflection
+        ? "Reflect before mutating. If the evidence establishes a repeatable procedure, return the reflection JSON shape below; the daemon will atomically compile each skill lesson together with every related knowledge, runner, tool, and policy lesson into a canonical project skill bundle. Choose no-change when the behavior was temporary or unsupported."
+        : "When the evidence is a completed project conversation, reflect before mutating. If it establishes a repeatable procedure, you may return the reflection JSON shape below instead of a component delta; the daemon will atomically compile each skill lesson together with every related knowledge, runner, tool, and policy lesson into a canonical project skill bundle. Choose no-change when the behavior was temporary or unsupported.",
+      "Use target skill for repeatable or conditional procedures, including project-specific host and environment command corrections. Use target runner only for a project-wide decision rule that must apply to every task without retrieval.",
       JSON.stringify({
         reflection: "short evidence-grounded synthesis",
         decision: "evolve",
         lessons: [{
-          sourceIds: [request.evidenceArtifactIds[0] ?? "evidence-artifact-id"],
+          sourceIds: [request.sourceSessionId],
           target: "skill",
           title: "short skill title",
           guidance: "complete repeatable project procedure",
           relevantPaths: ["project/relative/path"],
           appliesWhen: ["specific triggering task condition"],
           doesNotApplyWhen: ["specific adjacent task that must not trigger it"],
+          observableContracts: [{
+            operation: "exact function, route, command, or workflow step",
+            inputs: ["accepted inputs and boundary normalization"],
+            outputs: ["direct return value or exact response shape"],
+            errors: ["thrown error or exact status/body; use 'none' only when evidenced"],
+            sideEffects: ["state/process/file effects and their ordering; use 'none' when absent"],
+            exactValues: ["verbatim signature, path, command, code, status, or literal"],
+          }],
         }],
       }),
-      `Reflection sourceIds must cite only these supplied evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
+      `The completed source session is primary evidence: ${request.sourceSessionId}.`,
+      `Reflection sourceIds must cite only these supplied evidence source IDs: ${allowedSourceIds.join(", ")}.`,
+      "Keep each lesson's guidance complete and actionable, but no longer than 4096 characters.",
+      "Every skill lesson must include one observableContracts entry per learned operation. Every entry must explicitly cover inputs, outputs, errors, sideEffects, and exactValues; write the literal 'none' only when the evidence establishes no behavior in that category. Never collapse direct values into envelopes, thrown errors into returned errors, or exact response bodies into approximate examples.",
+      "Return between one and four lessons total. Merge related details into fewer lessons; never return five or more lessons.",
       "Include every related destination supported by the same evidence. The skill-scoped compiler preserves them in one candidate and exposes companion lessons only when the skill is selected.",
     );
   }
@@ -146,15 +179,11 @@ function evolutionObjective(request: EvolutionRequest): string {
 }
 
 function evolutionChildCapabilities(parent: CapabilityEnvelope, request: EvolutionRequest): CapabilityEnvelope {
-  const grants: CapabilityGrant[] = [];
-  for (const grant of parent.grants) {
-    switch (grant.kind) {
-      case "read-files": grants.push({ kind: grant.kind, pathPrefixes: [...grant.pathPrefixes] }); break;
-      default: break;
-    }
-  }
   return {
-    grants,
+    // Evolution is proposal-only. Its explicit evidence arrives through the
+    // goal/handoff and artifact.read, so workspace discovery is both wasteful
+    // and a source of benchmark leakage.
+    grants: [],
     modelRoles: parent.modelRoles.filter((role) => role === "main-coder" || role === "harness-mutator"),
     maxCostUsdMicros: request.budget.maxCostUsdMicros <= parent.maxCostUsdMicros ? request.budget.maxCostUsdMicros : parent.maxCostUsdMicros,
     maxModelCalls: Math.min(request.budget.maxModelCalls, parent.maxModelCalls),
@@ -167,13 +196,19 @@ function evolutionChildCapabilities(parent: CapabilityEnvelope, request: Evoluti
 }
 
 function skillEvalObjective(request: EvolutionRequest): string {
+  const evidenceInstruction = request.evidenceArtifactIds.length === 0
+    ? "No evidence artifacts were supplied. The opportunity text below is the complete evidence available to you. Do not call any tool; return the fixture JSON immediately."
+    : "Read only the supplied evidence artifacts with artifact.read. Do not inspect benchmark implementations, prior scorecards, evaluation results, or any proposed harness mutation.";
   return [
     "Independently design a hidden synthetic evaluation for the reusable behavior revealed by the supplied evidence.",
-    "Read the supplied evidence artifacts with artifact.read. Do not inspect benchmark implementations, prior scorecards, evaluation results, or any proposed harness mutation.",
+    evidenceInstruction,
     "Return exactly one JSON object with a fixtures array and no prose or code fence.",
     "The array must contain exactly one fixture for each variation: near-transfer, generalization, and negative-control.",
-    "Near-transfer should replay the same durable behavior with changed names or values. Generalization should require the underlying procedure in a meaningfully different case. Negative-control should be an adjacent task where the learned behavior must not trigger.",
-    "Each fixture shape is {variation,title,objective,files,checks,invariants}. files is a non-empty map of repository-relative paths to UTF-8 contents. checks and invariants are non-empty arrays of deterministic assertions shaped as {path,equals? ,contains? ,absent?}.",
+    "Near-transfer should replay the same durable behavior with changed names or values. Generalization should require the underlying procedure in a meaningfully different case. Negative-control must match at least one explicit doesNotApplyWhen cue from the opportunity and request none of the positive learned contracts; it is an adjacent task where the skill must not trigger.",
+    "This synthetic suite isolates one learned procedure; full-workspace replay separately validates the complete project. Each fixture must cover one focused change, use at most three starting files, contain at most six baseline checks, and must not request a complete application or unrelated architectural layers.",
+    "Each fixture shape is {variation,title,objective,files,checks,verifier,invariants}. files MUST be a JSON object mapping safe relative path keys directly to string contents, never an array; for example {\"src/index.js\":\"// starting content\\n\"}. files contains only the small STARTING workspace inputs visible before the task; never put a reference solution, expected output, completed test suite, or any file that solves the objective in files. checks are non-authoritative static diagnostics only; they may describe starting markers or expected source hints but never establish baseline state or success. Put baseline content that must remain true in invariants. The untouched starting files must satisfy every invariant. checks and invariants are non-empty arrays. Every static assertion uses exactly one operator: {path,equals:string}, {path,contains:string}, {path,notContains:string}, or {path,absent:true}.",
+    "verifier is the authoritative hidden behavioral test: {files:{\"verify.mjs\":\"...\"},command:{executable:\"node\",args:[\"verify.mjs\"]}}. Its files are injected only after the task runner finishes. The completed workspace snapshot is mirrored into the private verifier directory, and its command runs there offline and read-only. Use runtime-native assertions and import task files from the snapshot with workspace-relative paths such as ./src/module.js. Verifier files must not replace task files. Exit zero only when observable inputs, outputs, thrown errors, side effects, and exact wire values satisfy the opportunity. Equivalent implementations must pass; comments or matching source substrings with wrong behavior must fail. For every no-mutation or state-preservation claim, capture the relevant state immediately before the operation and compare the after-state with that snapshot; never assert a hardcoded collection length. Do not inspect source spelling when behavior is executable. Use only language/runtime built-ins and never install dependencies.",
+    "Static checks are diagnostics only. Never use them as a proxy for baseline state or final behavior, or infer that a token belongs in a particular file merely because both token and path appear in the opportunity. Preserve learned module responsibilities and verify externally visible behavior in the executable verifier.",
     "Keep fixtures tiny, isolated, offline, deterministic, and free of secrets. Hide the checks and invariants from the task-solving runner.",
     `Opportunity: ${request.goal}`,
     `Evidence artifact IDs: ${request.evidenceArtifactIds.join(", ") || "none"}.`,
@@ -190,6 +225,41 @@ function skillEvalChildCapabilities(parent: CapabilityEnvelope, request: Evoluti
     maxInputTokens: request.budget.maxInputTokens <= parent.maxInputTokens ? request.budget.maxInputTokens : parent.maxInputTokens,
     maxOutputTokens: request.budget.maxOutputTokens <= parent.maxOutputTokens ? request.budget.maxOutputTokens : parent.maxOutputTokens,
     wallTimeMs: request.budget.wallTimeMs <= parent.wallTimeMs ? request.budget.wallTimeMs : parent.wallTimeMs,
+    createdAt: now(),
+  };
+}
+
+function skillEvalRepairObjective(request: EvolutionRequest, proposal: string, error: EvolutionError): string {
+  return [
+    "Repair your previous synthetic fixture proposal after static validation. This is fixture-authoring feedback only; no candidate, benchmark execution, score, or promotion result exists or is disclosed.",
+    "This is a one-turn proposal-only correction. Do not call any tool; return the corrected fixture JSON immediately.",
+    "Return exactly one corrected JSON object with a fixtures array and no prose or code fence. Preserve the required near-transfer, generalization, and negative-control meanings from the opportunity.",
+    "Every fixture's files MUST be a JSON object mapping safe relative path keys directly to string contents, never an array. Static checks are diagnostics and do not need a particular baseline truth value. Every invariant must be true. Every fixture must include verifier:{files,command}; the completed workspace is mirrored into the private verifier directory, so import task files as ./src/module.js (or the corresponding workspace-relative path), and never replace a task file from verifier.files. It must execute observable behavior with runtime-native assertions, accept equivalent implementations, and reject comments or matching source text with wrong behavior. For every no-mutation or state-preservation claim, capture the relevant state immediately before the operation and compare the after-state with that snapshot; never assert a hardcoded collection length. Negative-control must match an explicit doesNotApplyWhen cue and request none of the positive learned contracts.",
+    `Validation error: ${JSON.stringify(error)}`,
+    `Opportunity: ${request.goal}`,
+    `Previous proposal:\n${proposal}`,
+  ].join("\n\n");
+}
+
+function reflectionRepairObjective(request: EvolutionRequest, proposal: string, error: EvolutionError): string {
+  return [
+    "Repair your previous reflection proposal after deterministic schema and retrieval validation. No benchmark result, score, candidate behavior, or promotion outcome exists or is disclosed.",
+    "This is one bounded proposal-only correction. Do not call any tool. Return exactly one corrected reflection JSON object and no prose or code fence. Raw component deltas and SKILL.md content are invalid.",
+    "Preserve every evidence-supported observable contract and source ID. decision must be evolve or no-change. For evolve, lessons must contain one to four items with target, title, guidance, relevantPaths, appliesWhen, doesNotApplyWhen, and observableContracts.",
+    "For every skill lesson, each observable contract must have a distinct behaviorally portable appliesWhen cue containing that operation and an exact signature, status, error, input, output, or side-effect value. Negative cues must describe behavioral boundaries, preserve negation polarity, and must not exclude renamed projects, services, repositories, or domain nouns.",
+    "Every observable contract must explicitly include non-empty operation, inputs, outputs, errors, sideEffects, and exactValues arrays. Use the literal 'none' only when the evidence establishes absence.",
+    `Allowed evidence source IDs: ${[request.sourceSessionId, ...request.evidenceArtifactIds].join(", ")}`,
+    `Validation error: ${JSON.stringify(error)}`,
+    `Opportunity: ${request.goal}`,
+    `Previous proposal:\n${proposal}`,
+  ].join("\n\n");
+}
+
+function reflectionRepairChildCapabilities(parent: CapabilityEnvelope, request: EvolutionRequest): CapabilityEnvelope {
+  return {
+    ...evolutionChildCapabilities(parent, request),
+    maxModelCalls: 1,
+    maxProcessStarts: 0,
     createdAt: now(),
   };
 }
@@ -355,7 +425,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
 
   async function update(
     job: EvolutionJob,
-    patch: Partial<Pick<EvolutionJob, "candidateHarnessId" | "scorecardId" | "state" | "suiteId">>,
+    patch: Partial<Pick<EvolutionJob, "candidateHarnessId" | "scorecardId" | "failure" | "state" | "suiteId" | "sessionId" | "childId" | "evaluationSessionId" | "evaluationChildId">>,
   ): Promise<Result<EvolutionJob, EvolutionError>> {
     return store({ ...job, ...patch, updatedAt: now() });
   }
@@ -376,10 +446,10 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     });
   }
 
-  async function finishFailed(id: EvolutionJobId): Promise<void> {
+  async function finishFailed(id: EvolutionJobId, failure: EvolutionError): Promise<void> {
     const job = jobs.get(id);
     if (job === undefined || job.state === "cancelled") return;
-    await update(job, { state: "failed" });
+    await update(job, { state: "failed", failure });
     if (job.evaluationSessionId !== undefined && job.evaluationSessionId !== null) {
       const evaluator = await options.repository.get(job.evaluationSessionId);
       if (evaluator.ok && evaluator.value.outcome === null) {
@@ -441,12 +511,18 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     const output = await childOutput(job.sessionId, "Evolution");
     if (!output.ok) return output;
     if (job.request.allowedComponentKinds.includes("skill")) {
-      const reflection = parseReflectionProposal(output.value.text, job.request.evidenceArtifactIds);
+      const allowedSourceIds = [job.request.sourceSessionId, ...job.request.evidenceArtifactIds];
+      const reflection = parseReflectionProposal(output.value.text, allowedSourceIds, job.request.sourceSessionId);
       if (reflection.ok) {
         return {
           ok: true,
           value: { kind: "reflection", proposal: reflection.value, artifactId: output.value.artifactId },
         };
+      }
+      if (job.request.evaluationMode === "synthetic-skill-suite"
+        && job.request.allowedComponentKinds.length === 1
+        && job.request.allowedComponentKinds[0] === "skill") {
+        return reflection;
       }
     }
     const parsed = parseDelta(output.value.text, job.request.allowedComponentKinds);
@@ -551,32 +627,61 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     if (signal.aborted || isCancelled(id)) return;
     const incumbent = await options.harnesses.getHarness(diagnosing.incumbentHarnessId);
     if (!incumbent.ok) {
-      await finishFailed(id);
+      await finishFailed(id, incumbent.error);
       return;
     }
     const child = await waitForSession(diagnosing, diagnosing.sessionId, "Evolution", signal);
     if (!child.ok || isCancelled(id)) {
-      if (!isCancelled(id)) await finishFailed(id);
+      if (!isCancelled(id)) await finishFailed(id, child.ok ? validation("Evolution was cancelled.", "signal") : child.error);
       return;
     }
     const synthetic = diagnosing.request.evaluationMode === "synthetic-skill-suite";
     if (synthetic) {
       if (diagnosing.evaluationSessionId === undefined || diagnosing.evaluationSessionId === null) {
-        await finishFailed(id);
+        await finishFailed(id, validation("Synthetic evolution is missing its evaluation child.", "evaluationSessionId"));
         return;
       }
       const evaluator = await waitForSession(diagnosing, diagnosing.evaluationSessionId, "Evaluation", signal);
       if (!evaluator.ok || isCancelled(id)) {
-        if (!isCancelled(id)) await finishFailed(id);
+        if (!isCancelled(id)) await finishFailed(id, evaluator.ok ? validation("Evolution was cancelled.", "signal") : evaluator.error);
         return;
       }
     }
 
     const mutatingResult = await update(jobs.get(id) ?? diagnosing, { state: "mutating" });
     if (!mutatingResult.ok) return;
-    const mutated = await mutate(incumbent.value, mutatingResult.value);
+    let mutationJob = mutatingResult.value;
+    let mutated = await mutate(incumbent.value, mutationJob);
+    const canonicalSkillReflection = synthetic
+      && diagnosing.request.allowedComponentKinds.length === 1
+      && diagnosing.request.allowedComponentKinds[0] === "skill";
+    if (!mutated.ok && canonicalSkillReflection && !isCancelled(id)) {
+      const previous = await childOutput(mutationJob.sessionId, "Evolution");
+      const source = await options.repository.get(diagnosing.request.sourceSessionId);
+      if (previous.ok && source.ok) {
+        const repair = await options.sessions.spawnChild({
+          parentSessionId: diagnosing.request.sourceSessionId,
+          role: "evolution",
+          objective: reflectionRepairObjective(diagnosing.request, previous.value.text, mutated.error),
+          contextArtifactIds: diagnosing.request.evidenceArtifactIds,
+          capabilityEnvelope: reflectionRepairChildCapabilities(source.value.header.capabilityEnvelope, diagnosing.request),
+        });
+        if (repair.ok) {
+          const repairedSession = await waitForSession(mutationJob, repair.value.sessionId, "Evolution repair", signal);
+          if (repairedSession.ok && !isCancelled(id)) {
+            const repairedJob = await update(jobs.get(id) ?? mutationJob, {
+              sessionId: repair.value.sessionId,
+              childId: repair.value.childId,
+            });
+            if (!repairedJob.ok) return;
+            mutationJob = repairedJob.value;
+            mutated = await mutate(incumbent.value, mutationJob);
+          }
+        }
+      }
+    }
     if (!mutated.ok) {
-      await finishFailed(id);
+      await finishFailed(id, mutated.error);
       return;
     }
     if (mutated.value === null) {
@@ -589,24 +694,67 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
     if (synthetic) {
       const evaluationSessionId = diagnosing.evaluationSessionId;
       if (evaluationSessionId === undefined || evaluationSessionId === null) {
-        await finishFailed(id);
+        await finishFailed(id, validation("Synthetic evolution is missing its evaluation child.", "evaluationSessionId"));
         return;
       }
       const output = await childOutput(evaluationSessionId, "Evaluation");
       if (!output.ok) {
-        await finishFailed(id);
+        await finishFailed(id, output.error);
         return;
       }
-      const compiled = await compileSkillEvalSuite(output.value.text, {
+      const compileInput = {
         projectId: diagnosing.request.projectId,
         sourceSessionId: diagnosing.request.sourceSessionId,
         evidenceArtifactIds: diagnosing.request.evidenceArtifactIds,
         proposalArtifactId: output.value.artifactId,
-        budget: diagnosing.request.budget,
+        budget: options.syntheticSkillTaskBudget ?? DEFAULT_CONFIG.benchmarks.syntheticSkillTaskBudget,
         createdAt: now(),
-      }, options.objects);
+      } as const;
+      let compiled = await compileSkillEvalSuite(output.value.text, compileInput, options.objects);
       if (!compiled.ok) {
-        await finishFailed(id);
+        const source = await options.repository.get(diagnosing.request.sourceSessionId);
+        if (!source.ok) {
+          await finishFailed(id, source.error);
+          return;
+        }
+        let previousText = output.value.text;
+        for (let repairAttempt = 1; repairAttempt <= 3 && !compiled.ok; repairAttempt += 1) {
+          const repair = await options.sessions.spawnChild({
+            parentSessionId: diagnosing.request.sourceSessionId,
+            role: "promotion-eval",
+            objective: skillEvalRepairObjective(diagnosing.request, previousText, compiled.error),
+            contextArtifactIds: diagnosing.request.evidenceArtifactIds,
+            capabilityEnvelope: skillEvalChildCapabilities(source.value.header.capabilityEnvelope, diagnosing.request),
+          });
+          if (!repair.ok) {
+            await finishFailed(id, repair.error);
+            return;
+          }
+          const repairedSession = await waitForSession(jobs.get(id) ?? mutatingResult.value, repair.value.sessionId, `Evaluation repair ${repairAttempt}`, signal);
+          if (!repairedSession.ok || isCancelled(id)) {
+            if (!isCancelled(id)) await finishFailed(id, repairedSession.ok ? validation("Evolution was cancelled.", "signal") : repairedSession.error);
+            return;
+          }
+          const repairJob = await update(jobs.get(id) ?? mutatingResult.value, {
+            evaluationSessionId: repair.value.sessionId,
+            evaluationChildId: repair.value.childId,
+          });
+          if (!repairJob.ok) return;
+          const repairedOutput = await childOutput(repair.value.sessionId, `Evaluation repair ${repairAttempt}`);
+          if (!repairedOutput.ok) {
+            await finishFailed(id, repairedOutput.error);
+            return;
+          }
+          previousText = repairedOutput.value.text;
+          compiled = await compileSkillEvalSuite(previousText, {
+            ...compileInput,
+            proposalArtifactId: repairedOutput.value.artifactId,
+            createdAt: now(),
+          }, options.objects);
+        }
+      }
+      if (!compiled.ok) {
+        await finishFailed(id, compiled.error);
         return;
       }
       suite = compiled.value;
@@ -632,7 +780,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
         signal,
       );
     if (!scorecard.ok) {
-      if (!isCancelled(id)) await finishFailed(id);
+      if (!isCancelled(id)) await finishFailed(id, scorecard.error);
       return;
     }
     if (isCancelled(id)) return;
@@ -693,6 +841,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
       suiteId: null,
       candidateHarnessId: null,
       scorecardId: null,
+      failure: null,
       state: "queued",
       createdAt,
       updatedAt: createdAt,
@@ -723,7 +872,7 @@ export const createEvolutionService: CreateEvolutionService = (options): Evoluti
         return { ok: false, error: validation("Evolution retry requires a succeeded evaluation child.", "jobId") };
       }
     }
-    const queued = await store({ ...job, state: "queued", candidateHarnessId: null, scorecardId: null, suiteId: null, updatedAt: now() });
+    const queued = await store({ ...job, state: "queued", candidateHarnessId: null, scorecardId: null, failure: null, suiteId: null, updatedAt: now() });
     if (!queued.ok) return queued;
     schedule(queued.value);
     return queued;
@@ -804,6 +953,9 @@ function isEvolutionJob(value: unknown): value is EvolutionJob {
     || (value["suiteId"] !== undefined && value["suiteId"] !== null && typeof value["suiteId"] !== "string")
     || (value["candidateHarnessId"] !== null && typeof value["candidateHarnessId"] !== "string")
     || (value["scorecardId"] !== null && typeof value["scorecardId"] !== "string")
+    || (value["failure"] !== undefined && value["failure"] !== null
+      && (!isRecord(value["failure"]) || typeof value["failure"]["kind"] !== "string"
+        || typeof value["failure"]["recoverable"] !== "boolean" || typeof value["failure"]["callerAction"] !== "string"))
     || typeof value["state"] !== "string" || !TERMINAL_STATES.has(value["state"] as EvolutionJob["state"])
       && !["queued", "diagnosing", "mutating", "evaluating"].includes(value["state"])
     || typeof value["createdAt"] !== "string" || typeof value["updatedAt"] !== "string" || !isRecord(value["request"])) {

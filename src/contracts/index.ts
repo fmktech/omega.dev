@@ -446,6 +446,8 @@ export type OmegaConfig = {
     readonly developmentSuiteId: BenchmarkSuiteId;
     readonly maxConcurrentRuns: number;
     readonly developmentPromotionPolicy: PromotionEvalPolicy;
+    /** Workspace-execution budget for each generated synthetic skill task; independent from proposal synthesis. */
+    readonly syntheticSkillTaskBudget: BenchmarkBudget;
     /** Null means every benchmark manifest must declare its own budget. */
     readonly fallbackBudget: BenchmarkBudget | null;
   };
@@ -880,6 +882,10 @@ export type SkillDocument = {
 export type RunnerBootstrapContext = {
   /** Ordered from repository root to the deepest lexical scope. */
   readonly instructions: readonly ProjectInstruction[];
+  /** Sorted repository-relative regular files visible at session start. */
+  readonly workspaceFiles: readonly RelativePath[];
+  /** True when workspaceFiles is a bounded prefix rather than the complete inventory. */
+  readonly workspaceInventoryTruncated: boolean;
   readonly knowledgeCatalog: readonly KnowledgeCatalogEntry[];
   readonly skillCatalog: readonly SkillCatalogEntry[];
 };
@@ -916,7 +922,7 @@ export type RunnerRequest =
   | { readonly kind: "session.complete"; readonly requestId: RequestId; readonly outcome: SessionOutcome };
 
 export type RunnerReply =
-  | { readonly kind: "request.rejected"; readonly requestId: RequestId; readonly error: HarnessVersionMismatchError }
+  | { readonly kind: "request.rejected"; readonly requestId: RequestId; readonly error: HarnessVersionMismatchError | ValidationError }
   | { readonly kind: "context.bootstrapped"; readonly requestId: RequestId; readonly result: Result<RunnerBootstrapContext, ContextError> }
   | { readonly kind: "skill.read"; readonly requestId: RequestId; readonly result: Result<SkillDocument, ContextError> }
   | { readonly kind: "model.started"; readonly requestId: RequestId; readonly result: Result<{ readonly streamId: ModelStreamId; readonly route: ModelRouteSignature }, ModelError> }
@@ -1067,6 +1073,34 @@ export type PersistedEventPayload =
   | { readonly kind: "handoff.created"; readonly handoff: HandoffRecord }
   | { readonly kind: "session.recovered"; readonly interruptedProcessIds: readonly ProcessId[] }
   | { readonly kind: "session.completed"; readonly outcome: SessionOutcome };
+
+/** Runtime discriminants for persisted events, exhaustively checked against the wire union. */
+export const PERSISTED_EVENT_KINDS = {
+  "session.started": true,
+  "runner.started": true,
+  "runner.stopped": true,
+  "model.started": true,
+  "model.completed": true,
+  "model.failed": true,
+  "policy.decided": true,
+  "policy.escalated": true,
+  "policy.resolved": true,
+  "process.started": true,
+  "process.observed": true,
+  "process.completed": true,
+  "child.spawned": true,
+  "child.completed": true,
+  "artifact.recorded": true,
+  "knowledge.updated": true,
+  "skill.loaded": true,
+  "marketplace.published": true,
+  "evolution.updated": true,
+  "benchmark.completed": true,
+  "harness.updated": true,
+  "handoff.created": true,
+  "session.recovered": true,
+  "session.completed": true,
+} as const satisfies Readonly<Record<PersistedEventPayload["kind"], true>>;
 
 export type SessionEvent = {
   readonly id: EventId;
@@ -1410,6 +1444,8 @@ export type EvolutionJob = {
   readonly suiteId?: BenchmarkSuiteId | null;
   readonly candidateHarnessId: HarnessId | null;
   readonly scorecardId: ScorecardId | null;
+  /** Durable cause for an asynchronously failed job; absent on persisted jobs created before this field. */
+  readonly failure?: EvolutionError | null;
   readonly state: EvolutionState;
   readonly createdAt: Timestamp;
   readonly updatedAt: Timestamp;
@@ -1481,6 +1517,7 @@ export type ClientRequest =
   | { readonly kind: "marketplace.transition"; readonly requestId: RequestId; readonly request: MarketplaceTransitionRequest }
   | { readonly kind: "harness.get"; readonly requestId: RequestId; readonly harnessId: HarnessId }
   | { readonly kind: "harness.list"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly page: PageRequest }
+  | { readonly kind: "harness.upgrade-runner"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly reason: string }
   | { readonly kind: "harness.rollback"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly targetHarnessId: HarnessId; readonly reason: string }
   | { readonly kind: "harness.pin"; readonly requestId: RequestId; readonly projectId: ProjectId; readonly targetHarnessId: HarnessId; readonly reason: string };
 
@@ -1588,6 +1625,8 @@ export interface FileService {
 }
 
 export interface ProcessSupervisor {
+  /** Starts daemon-owned runner infrastructure without consuming the session's tool-process budget. */
+  startRunner(spec: ProcessSpec, capabilities: CapabilityEnvelope): Promise<Result<ProcessHandle, ProcessError>>;
   start(spec: ProcessSpec, capabilities: CapabilityEnvelope): Promise<Result<ProcessHandle, ProcessError>>;
   observe(processId: ProcessId, after: readonly { readonly stream: ProcessStream; readonly offset: ByteCount }[]): Promise<Result<ProcessObservation, ProcessError>>;
   input(processId: ProcessId, input: ProcessInput): Promise<Result<{ readonly acceptedBytes: ByteCount }, ProcessError>>;
@@ -1765,6 +1804,8 @@ export type CreateEvolutionService = (options: {
   readonly harnesses: HarnessRepository;
   readonly benchmarks: BenchmarkService;
   readonly activation: HarnessActivationService;
+  /** Defaults to the built-in config for direct test/integration construction. */
+  readonly syntheticSkillTaskBudget?: BenchmarkBudget;
 }) => EvolutionService;
 export type CreateOmegaBenchManifest = (policy: PromotionEvalPolicy) => BenchmarkManifest;
 export type CreateOmegaClient = (baseUrl: string, bearerToken: string) => OmegaClient;

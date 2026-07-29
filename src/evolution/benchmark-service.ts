@@ -238,11 +238,11 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     if (incumbent.value.projectId !== candidate.value.projectId) {
       return { ok: false, error: validation("Paired harnesses must belong to the same project.", "candidateId") };
     }
-    const evaluatorRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "promotion-evaluator");
-    if (evaluatorRoute === undefined) {
-      return { ok: false, error: validation("The promotion-evaluator route is not configured.", "models.routes") };
+    const coderRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "main-coder");
+    if (coderRoute === undefined) {
+      return { ok: false, error: validation("The main-coder route is not configured.", "models.routes") };
     }
-    const route = routeSignature(evaluatorRoute);
+    const route = routeSignature(coderRoute);
     const pairedResults: PairedTaskResult[] = [];
     for (const task of manifest.tasks) {
       const incumbentRuns: BenchmarkRun[] = [];
@@ -319,11 +319,11 @@ export const createBenchmarkService: CreateBenchmarkService = (options): Benchma
     if (candidateSkillComponentIds.length === 0) {
       return { ok: false, error: validation("A synthetic skill evaluation requires a candidate-only skill component.", "candidateId") };
     }
-    const evaluatorRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "promotion-evaluator");
-    if (evaluatorRoute === undefined) {
-      return { ok: false, error: validation("The promotion-evaluator route is not configured.", "models.routes") };
+    const coderRoute = DEFAULT_CONFIG.models.routes.find((route) => route.role === "main-coder");
+    if (coderRoute === undefined) {
+      return { ok: false, error: validation("The main-coder route is not configured.", "models.routes") };
     }
-    const route = routeSignature(evaluatorRoute);
+    const route = routeSignature(coderRoute);
     const privateById = new Map(suite.privateTasks.map((task) => [task.taskId, task] as const));
     const pairedResults: PairedTaskResult[] = [];
     for (const task of suite.manifest.tasks) {

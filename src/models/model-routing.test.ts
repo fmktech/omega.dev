@@ -97,11 +97,27 @@ function routerWithBoundary(
     DEFAULT_CONFIG.models,
     environment,
     { openrouter: createOpenRouterAdapter(openRouterBoundary) },
-    { createStreamId: () => "stream-1" as ModelStreamId },
+    {
+      createStreamId: () => "stream-1" as ModelStreamId,
+      waitBeforeRetry: async () => undefined,
+    },
   );
 }
 
 describe("model routing", () => {
+  it("keeps structured promotion evaluation compact and reasoning-free", async () => {
+    const router = routerWithBoundary(boundary([]));
+
+    const result = await router.resolve("promotion-evaluator");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.modelId).toBe("google/gemini-3-flash-preview");
+      expect(result.value.reasoning).toEqual({ mode: "off" });
+      expect(result.value.temperature).toBe(0);
+    }
+  });
+
   it("resolves a logical role to its frozen route signature", async () => {
     const router = routerWithBoundary(boundary([]));
 
@@ -206,10 +222,11 @@ describe("model routing", () => {
   });
 
   it("preserves partial deltas before a provider stream failure", async () => {
+    const captured: OpenRouterBoundaryRequest[] = [];
     const router = routerWithBoundary(boundary([
       { type: "text-delta", text: "partial" },
       { type: "error", error: new Error("socket closed") },
-    ]));
+    ], captured));
 
     const result = await router.stream(request(), capabilities());
     expect(result.ok).toBe(true);
@@ -217,6 +234,96 @@ describe("model routing", () => {
       const events = await collect(result.value.events);
       expect(events[0]).toEqual({ kind: "text-delta", streamId: "stream-1", delta: "partial" });
       expect(events[1]).toEqual(expect.objectContaining({ kind: "failed", partialArtifactId: null }));
+      expect(captured).toHaveLength(1);
+    }
+  });
+
+  it("retries a recoverable provider failure before any output is visible", async () => {
+    let attempts = 0;
+    const retryable = new APICallError({
+      message: "temporary backend rejection",
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      requestBodyValues: {},
+      statusCode: 400,
+    });
+    const dynamicBoundary: OpenRouterBoundary = {
+      stream() {
+        attempts += 1;
+        return boundary(attempts === 1
+          ? [{ type: "error", error: retryable }]
+          : [
+              { type: "text-delta", text: "recovered" },
+              { type: "finish", finishReason: "stop", totalUsage: SDK_USAGE },
+            ]).stream({} as OpenRouterBoundaryRequest);
+      },
+    };
+    const router = routerWithBoundary(dynamicBoundary);
+
+    const result = await router.stream(request(), capabilities());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const events = await collect(result.value.events);
+      expect(attempts).toBe(2);
+      expect(events).toEqual([
+        { kind: "text-delta", streamId: "stream-1", delta: "recovered" },
+        expect.objectContaining({ kind: "usage" }),
+        expect.objectContaining({ kind: "completed" }),
+      ]);
+    }
+  });
+
+  it("retries an empty provider finish whose reason is error", async () => {
+    let attempts = 0;
+    const dynamicBoundary: OpenRouterBoundary = {
+      stream() {
+        attempts += 1;
+        return boundary(attempts === 1
+          ? [{ type: "finish", finishReason: "error", totalUsage: SDK_USAGE }]
+          : [
+              { type: "text-delta", text: "recovered" },
+              { type: "finish", finishReason: "stop", totalUsage: SDK_USAGE },
+            ]).stream({} as OpenRouterBoundaryRequest);
+      },
+    };
+    const router = routerWithBoundary(dynamicBoundary);
+
+    const result = await router.stream(request(), capabilities());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const events = await collect(result.value.events);
+      expect(attempts).toBe(2);
+      expect(events).toEqual([
+        { kind: "text-delta", streamId: "stream-1", delta: "recovered" },
+        expect.objectContaining({ kind: "usage" }),
+        expect.objectContaining({ kind: "completed", completion: expect.objectContaining({ finishReason: "stop" }) }),
+      ]);
+    }
+  });
+
+  it("emits one terminal failure after exhausting bounded clean retries", async () => {
+    let attempts = 0;
+    const dynamicBoundary: OpenRouterBoundary = {
+      stream() {
+        attempts += 1;
+        return boundary([{ type: "error", error: new Error("backend unavailable") }])
+          .stream({} as OpenRouterBoundaryRequest);
+      },
+    };
+    const router = routerWithBoundary(dynamicBoundary);
+
+    const result = await router.stream(request(), capabilities());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(await collect(result.value.events)).toEqual([
+        expect.objectContaining({
+          kind: "failed",
+          error: expect.objectContaining({ kind: "provider-unavailable", recoverable: true }),
+        }),
+      ]);
+      expect(attempts).toBe(3);
     }
   });
 

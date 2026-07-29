@@ -40,7 +40,9 @@ describe("project context service", () => {
     await writeFile(join(root, "AGENTS.md"), "root instruction\n", "utf8");
     await writeFile(join(root, "packages", "AGENTS.md"), "packages instruction\n", "utf8");
     await writeFile(join(root, "packages", "api", "AGENTS.md"), "api instruction\n", "utf8");
+    await writeFile(join(root, "packages", "api", "index.ts"), "export const value = 1;\n", "utf8");
     await writeFile(join(root, "node_modules", "ignored", "AGENTS.md"), "must not load\n", "utf8");
+    await writeFile(join(root, "node_modules", "ignored", "index.js"), "throw new Error();\n", "utf8");
 
     const skillMarkdown = [
       "---",
@@ -73,6 +75,13 @@ describe("project context service", () => {
       { path: "packages/api/AGENTS.md", scope: "packages/api", content: "api instruction\n" },
     ]);
     expect(result.value.knowledgeCatalog).toEqual([expect.objectContaining({ id: "project-environment", title: "Local environment" })]);
+    expect(result.value.workspaceFiles).toEqual([
+      "AGENTS.md",
+      "packages/AGENTS.md",
+      "packages/api/AGENTS.md",
+      "packages/api/index.ts",
+    ]);
+    expect(result.value.workspaceInventoryTruncated).toBe(false);
     expect(result.value.skillCatalog).toEqual([{
       componentId: fixture.skillId,
       name: "api-client-release",

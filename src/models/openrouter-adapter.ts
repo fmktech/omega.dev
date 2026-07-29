@@ -546,6 +546,16 @@ export function createOpenRouterAdapter(boundary: OpenRouterBoundary = AI_SDK_BO
               return;
             } else if (part.type === "finish") {
               finalUsage = usage(part.totalUsage, finalMetadata.costUsdMicros);
+              const finishReason = mapFinishReason(part.finishReason);
+              if (finishReason === "error") {
+                yield {
+                  kind: "failed",
+                  streamId: request.streamId,
+                  error: providerError(new Error("Provider finished the generation with an error"), request.provider.providerId),
+                  partialArtifactId: null,
+                };
+                return;
+              }
               yield { kind: "usage", streamId: request.streamId, usage: finalUsage };
               yield {
                 kind: "completed",
@@ -558,7 +568,7 @@ export function createOpenRouterAdapter(boundary: OpenRouterBoundary = AI_SDK_BO
                   startedAt,
                   firstTokenAt,
                   completedAt: new Date().toISOString() as Timestamp,
-                  finishReason: mapFinishReason(part.finishReason),
+                  finishReason,
                 },
               };
               return;

@@ -66,3 +66,43 @@ Earlier records remain in the same directory. They document calibration defects 
 For this project family, a base model can turn a prior correction into a valid project skill and use it in later unseen workspace executions. The resulting harness was strictly better on verified outcomes, did not over-trigger on the adjacent negative task, and required materially less exploratory work.
 
 This is evidence for the complete learning mechanism, not a universal model-quality claim. It covers one learned workflow, one repository shape, three task variants, and three replicates. Broader claims require additional project families and a final workstream holdout in which benchmark results never select intermediate mutations.
+
+## Reproduction after lifecycle hardening — 2026-07-27
+
+The frozen three-replicate benchmark was rerun after the reflection, retrieval, execution, and verifier lifecycle fixes. Its first reflection response was structurally invalid; the new bounded reflection seam recorded that failure and succeeded on attempt two instead of terminating the benchmark.
+
+| Measure | Incumbent | Candidate |
+| --- | ---: | ---: |
+| Relevant holdout passes | 5/6 | **6/6** |
+| Negative-control passes | 3/3 | **3/3** |
+| Total closed-loop passes | 8/9 | **9/9** |
+| Tool calls | 100 | **62** |
+| Provider cost | 7,598 μUSD | **7,157 μUSD** |
+
+All nine pairs were comparable on model route and serving provider. The candidate read the skill in all six relevant runs, did not read it in any of the three negative controls, gained one verified outcome, and regressed none. Tool calls fell 38%. Cost fell 5.8%, below the separately frozen 10% material-cost threshold, so this rerun establishes capability improvement and tool economy—not a material provider-cost claim.
+
+Authoritative record:
+
+`~/.omega/benchmarks/workspace-skill-transfer/30eb98ecb4fb07432bbbf992db8df12b643b3285b11ab5c8f16b339439f4a505.json`
+
+## Full-mark v5 reproduction — 2026-07-27
+
+Version 5 freezes reflection scorer v2, which distinguishes explicit prohibition from endorsement and excludes historical narration from actionable contradiction scoring. Earlier records remain unchanged.
+
+| Gate | Result |
+| --- | ---: |
+| Reflection | **10/10** |
+| Comparable pairs | **9/9** |
+| Candidate relevant holdouts | **6/6** |
+| Candidate negative controls | **3/3** |
+| Correct relevant skill reads | **6/6** |
+| Correct negative-control non-reads | **3/3** |
+| Capability gains / regressions | **2 / 0** |
+| Tool calls | 102 → **47** (−53.9%) |
+| Provider cost | 7,077 → **5,550 μUSD** (−21.6%) |
+
+The candidate passed every hidden real-workspace check and cleared both frozen efficiency thresholds (20% fewer tool calls and 10% lower provider cost). Evaluation feedback remained hidden from reflection and execution.
+
+Authoritative v5 record:
+
+`~/.omega/benchmarks/workspace-skill-transfer/668f7016c6c2ede3ca0eb61a672af07349767ab3836434f8ef75d2d8e9d51685.json`

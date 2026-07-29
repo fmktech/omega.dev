@@ -28,6 +28,12 @@ const GPT_OSS_20B_LIST_PRICE = {
   outputUsdMicrosPerMillionTokens: 140_000 as UsdMicros,
 } as const;
 
+const GEMINI_3_FLASH_LIST_PRICE = {
+  inputUsdMicrosPerMillionTokens: 500_000 as UsdMicros,
+  cachedInputUsdMicrosPerMillionTokens: 500_000 as UsdMicros,
+  outputUsdMicrosPerMillionTokens: 3_000_000 as UsdMicros,
+} as const;
+
 export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
   schemaVersion: 1,
   homeDirectory: {
@@ -165,13 +171,13 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
       {
         role: "promotion-evaluator",
         providerId: "openrouter",
-        modelId: "deepseek/deepseek-v4-flash",
-        reasoning: { mode: "effort", effort: "high" },
+        modelId: "google/gemini-3-flash-preview",
+        reasoning: { mode: "off" },
         selection: {
           kind: "openrouter",
-          mode: "exacto",
-          providerOrder: ["GMICloud"],
-          allowFallbacks: false,
+          mode: "balanced",
+          providerOrder: [],
+          allowFallbacks: true,
           requireParameters: true,
           dataCollection: "allow",
           zeroDataRetention: null,
@@ -182,7 +188,7 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
         contextLimit: 1_000_000 as TokenCount,
         maxOutputTokens: 16_384 as TokenCount,
         timeoutMs: 300_000 as DurationMs,
-        equivalentListPrice: DEEPSEEK_V4_FLASH_LIST_PRICE,
+        equivalentListPrice: GEMINI_3_FLASH_LIST_PRICE,
       },
       {
         role: "diagnostician",
@@ -261,6 +267,14 @@ export const DEFAULT_CONFIG: Readonly<OmegaConfig> = {
       ],
       workspaceBaseline: "fixture-object-hash",
       comparisonOrder: ["invariants", "capability", "cost", "latency"],
+    },
+    syntheticSkillTaskBudget: {
+      wallTimeMs: 480_000 as DurationMs,
+      maxModelCalls: 40,
+      maxInputTokens: 360_000 as TokenCount,
+      maxOutputTokens: 64_000 as TokenCount,
+      maxCostUsdMicros: 0 as UsdMicros,
+      maxProcessStarts: 40,
     },
     fallbackBudget: null,
   },

@@ -83,6 +83,10 @@ function childModelRole(role: SpawnChildRequest["role"]): ModelRole {
   }
 }
 
+function isPostSessionChild(role: SpawnChildRequest["role"]): boolean {
+  return role === "evolution" || role === "promotion-eval";
+}
+
 export const createSessionService: CreateSessionService = (options) => {
   const subscriptions = new Map<SessionId, Set<LiveQueue>>();
 
@@ -376,7 +380,9 @@ export const createSessionService: CreateSessionService = (options) => {
     async spawnChild(request: SpawnChildRequest) {
       const parent = await options.repository.get(request.parentSessionId);
       if (!parent.ok) return parent;
-      if (parent.value.outcome !== null) return conflict("parent-session", "active", parent.value.state);
+      if (parent.value.outcome !== null && !isPostSessionChild(request.role)) {
+        return conflict("parent-session", "active or post-session evolution", parent.value.state);
+      }
       if (request.objective.trim().length === 0) return validation("Child objective must not be empty", "objective");
       if (!parent.value.header.capabilityEnvelope.grants.some((grant) => grant.kind === "spawn-child")) {
         return childDenied("Parent session is not permitted to spawn children");
@@ -411,7 +417,7 @@ export const createSessionService: CreateSessionService = (options) => {
       }
       const handoff = await createHandoffFor(parent.value.header.id);
       if (!handoff.ok) return handoff;
-      const harness = await options.harnesses.getHarness(parent.value.header.initialHarnessId);
+      const harness = await options.harnesses.getActiveHarness(parent.value.header.projectId);
       if (!harness.ok) return harness;
       const workspace = await options.projects.getWorkspace(parent.value.header.workspaceId);
       if (!workspace.ok) return workspace;

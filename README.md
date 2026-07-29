@@ -4,6 +4,14 @@ Omega.dev is a local daemon, CLI, and HTML control plane for a project-scoped, s
 
 This repository is an early implementation. The runtime contract is strict and the main flows are tested, but the product is not yet a stable release.
 
+## The core idea: transferring a skill from the user into the harness
+
+Omega treats repeated developer feedback as evidence of a skill that exists in the user's mind but is still unknown to the harness. A vague request exposes the gap: the agent attempts the work, the user corrects what is missing or wasteful, and the agent iterates until the result is good. That back-and-forth contains more than a final answer—it reveals the user's acceptance criteria, project knowledge, preferred procedure, and the mistakes that should not recur.
+
+Session reflection captures that trajectory and crystallizes its reusable parts into project-scoped skills, knowledge, tools, runners, or policy. On a later related request, the evolved harness should reach the same quality with fewer corrections, fewer errors, and fewer unnecessary tool calls. Self-improvement therefore means progressively transferring previously private judgment from the user into the harness, not merely asking a model to rewrite its own prompt.
+
+In a synthetic learning benchmark, the evaluation harness temporarily acts as the user: it returns actionable test or verifier feedback during a learning episode. That feedback is visible to reflection and may produce a candidate harness mutation. The claim is then tested on fresh, sealed variations: their initial attempts receive no evaluator feedback, and any later correction is counted as simulated user intervention but can never revise the candidate. A mutation is useful only when it transfers—preserving correctness while reducing intervention or waste—rather than memorizing the training fixture.
+
 ## What is implemented
 
 - One local daemon shared by the HTML client and `omega` CLI.
@@ -84,6 +92,9 @@ The first completed live evolution run is recorded in [`docs/benchmarks/2026-07-
 The native reflection-to-skill retrieval benchmark is recorded in [`docs/benchmarks/2026-07-19-reflection-skill-transfer.md`](docs/benchmarks/2026-07-19-reflection-skill-transfer.md).
 The production-shaped workspace transfer benchmark is recorded in [`docs/benchmarks/2026-07-19-workspace-skill-transfer.md`](docs/benchmarks/2026-07-19-workspace-skill-transfer.md).
 The second no-selection continual-workstream result is recorded in [`docs/benchmarks/2026-07-20-continual-workstream-rerun.md`](docs/benchmarks/2026-07-20-continual-workstream-rerun.md).
+The mutation-backed TypeScript test-authoring skill benchmark is recorded in [`docs/benchmarks/2026-07-20-typescript-test-quality.md`](docs/benchmarks/2026-07-20-typescript-test-quality.md).
+The feedback-to-skill transfer benchmark is recorded in [`docs/benchmarks/2026-07-20-feedback-skill-transfer.md`](docs/benchmarks/2026-07-20-feedback-skill-transfer.md).
+The multidimensional operational-internalization benchmark is recorded in [`docs/benchmarks/2026-07-21-operational-internalization.md`](docs/benchmarks/2026-07-21-operational-internalization.md).
 
 ## License
 

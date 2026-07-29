@@ -59,6 +59,15 @@ const PROJECT_ID = "project-test" as ProjectId;
 const WORKSPACE_ID = "workspace-test" as WorkspaceId;
 const HARNESS_ID = "harness-test" as HarnessId;
 const CANDIDATE_HARNESS_ID = "harness-candidate" as HarnessId;
+const POST_TERMINAL_EVENT_KINDS: ReadonlySet<PersistedEventPayload["kind"]> = new Set([
+  "policy.decided",
+  "policy.escalated",
+  "policy.resolved",
+  "artifact.recorded",
+  "handoff.created",
+  "child.spawned",
+  "child.completed",
+]);
 
 class MemoryObjects implements ObjectStore {
   readonly values = new Map<ObjectHash, Uint8Array>();
@@ -119,7 +128,7 @@ class MemorySessions implements SessionRepository {
   ): Promise<Result<SessionEvent, SessionError>> {
     const record = this.records.get(id);
     if (record === undefined) return notFound("session", id);
-    if (record.outcome !== null) {
+    if (record.outcome !== null && !POST_TERMINAL_EVENT_KINDS.has(payload.kind)) {
       return conflictResult("session-terminal", payload.kind === "session.completed" ? payload.outcome : "non-terminal", record.outcome);
     }
     if (record.lastSequence !== expectedSequence) return conflictResult("sequence", String(expectedSequence), String(record.lastSequence));
@@ -170,6 +179,7 @@ class MemorySessions implements SessionRepository {
 class FakeProcesses implements ProcessSupervisor {
   readonly active = new Map<ProcessId, ProcessHandle>();
   cancelled = 0;
+  async startRunner(): Promise<Result<ProcessHandle, ProcessError>> { return unsupportedProcess(); }
   async start(): Promise<Result<ProcessHandle, ProcessError>> { return unsupportedProcess(); }
   async observe(): Promise<Result<never, ProcessError>> { return unsupportedProcess(); }
   async input(): Promise<Result<never, ProcessError>> { return unsupportedProcess(); }
@@ -241,11 +251,12 @@ function fixture() {
   };
   const pointerWrites = { count: 0 };
   const pumpedSessions: SessionId[] = [];
+  const activeHarness = { id: HARNESS_ID };
   const service = createSessionService({
     config: DEFAULT_CONFIG.sessions,
     repository,
     projects: projectRepository(project, workspace, pointerWrites),
-    harnesses: harnessRepository([harness, candidate], HARNESS_ID),
+    harnesses: harnessRepository([harness, candidate], activeHarness),
     runners,
     processes,
     models: modelRouter(),
@@ -256,7 +267,7 @@ function fixture() {
       async stop() { return; },
     },
   });
-  return { service, repository, objects, processes, runners, project, candidate, pointerWrites, pumpedSessions };
+  return { service, repository, objects, processes, runners, project, candidate, activeHarness, pointerWrites, pumpedSessions };
 }
 
 describe("session service", () => {
@@ -381,6 +392,29 @@ describe("session service", () => {
     expect(spawn?.id).toBe(child.value.spawnEventId);
   });
 
+  it("uses the project-active harness for a child started after its parent", async () => {
+    const f = fixture();
+    const parent = await f.service.startTask({ projectId: PROJECT_ID, workspaceId: WORKSPACE_ID, objective: "parent", modelRole: "main-coder" });
+    expect(parent.ok).toBe(true);
+    if (!parent.ok) return;
+    expect(parent.value.header.initialHarnessId).toBe(HARNESS_ID);
+    f.activeHarness.id = CANDIDATE_HARNESS_ID;
+
+    const child = await f.service.spawnChild({
+      parentSessionId: parent.value.header.id,
+      role: "diagnostician",
+      objective: "inspect with current harness",
+      contextArtifactIds: [],
+      capabilityEnvelope: envelope({ grants: [{ kind: "read-files", pathPrefixes: ["src" as RelativePath] }], modelRoles: ["diagnostician"] }),
+    });
+
+    expect(child.ok).toBe(true);
+    if (!child.ok) return;
+    const childSession = await f.repository.get(child.value.sessionId);
+    expect(childSession.ok && childSession.value.header.initialHarnessId).toBe(CANDIDATE_HARNESS_ID);
+    expect(f.runners.starts.at(-1)?.initialHarnessId).toBe(CANDIDATE_HARNESS_ID);
+  });
+
   it("completes idempotently and emits one child completion into the parent", async () => {
     const f = fixture();
     const parent = await f.service.startTask({ projectId: PROJECT_ID, workspaceId: WORKSPACE_ID, objective: "parent", modelRole: "main-coder" });
@@ -397,6 +431,74 @@ describe("session service", () => {
     expect((await f.service.complete(child.value.sessionId, "succeeded")).ok).toBe(true);
     const completed = (f.repository.events.get(parent.value.header.id) ?? []).filter((event) => event.payload.kind === "child.completed");
     expect(completed).toHaveLength(1);
+  });
+
+  it("spawns post-session evolution but keeps ordinary child work sealed after completion", async () => {
+    const f = fixture();
+    const parent = await f.service.startTask({
+      projectId: PROJECT_ID,
+      workspaceId: WORKSPACE_ID,
+      objective: "learn from completed work",
+      modelRole: "main-coder",
+    });
+    if (!parent.ok) throw new Error("fixture start failed");
+    const parentSessionId = parent.value.header.id;
+    const completed = await f.service.complete(parentSessionId, "succeeded");
+    expect(completed.ok).toBe(true);
+    if (!completed.ok) return;
+    const completedAt = completed.value.completedAt;
+
+    const evolution = await f.service.spawnChild({
+      parentSessionId,
+      role: "evolution",
+      objective: "crystallize the trajectory",
+      contextArtifactIds: [],
+      capabilityEnvelope: envelope({
+        grants: [{ kind: "read-files", pathPrefixes: ["." as RelativePath] }],
+        modelRoles: ["harness-mutator"],
+      }),
+    });
+    expect(evolution.ok).toBe(true);
+    if (!evolution.ok) return;
+
+    expect((await f.service.complete(evolution.value.sessionId, "succeeded")).ok).toBe(true);
+
+    const promotionEvaluation = await f.service.spawnChild({
+      parentSessionId,
+      role: "promotion-eval",
+      objective: "evaluate the candidate",
+      contextArtifactIds: [],
+      capabilityEnvelope: envelope({
+        grants: [{ kind: "read-files", pathPrefixes: ["." as RelativePath] }],
+        modelRoles: ["promotion-evaluator"],
+      }),
+    });
+    expect(promotionEvaluation.ok).toBe(true);
+    if (!promotionEvaluation.ok) return;
+    expect((await f.service.complete(promotionEvaluation.value.sessionId, "succeeded")).ok).toBe(true);
+
+    const parentAfterEvolution = await f.repository.get(parentSessionId);
+    expect(parentAfterEvolution.ok).toBe(true);
+    if (parentAfterEvolution.ok) {
+      expect(parentAfterEvolution.value.outcome).toBe("succeeded");
+      expect(parentAfterEvolution.value.completedAt).toBe(completedAt);
+    }
+    const parentEventKinds = (f.repository.events.get(parentSessionId) ?? []).map((event) => event.payload.kind);
+    expect(parentEventKinds.filter((kind) => kind === "child.spawned")).toHaveLength(2);
+    expect(parentEventKinds.filter((kind) => kind === "child.completed")).toHaveLength(2);
+
+    const ordinary = await f.service.spawnChild({
+      parentSessionId,
+      role: "diagnostician",
+      objective: "continue ordinary work",
+      contextArtifactIds: [],
+      capabilityEnvelope: envelope({
+        grants: [{ kind: "read-files", pathPrefixes: ["." as RelativePath] }],
+        modelRoles: ["diagnostician"],
+      }),
+    });
+    expect(ordinary.ok).toBe(false);
+    if (!ordinary.ok) expect(ordinary.error.kind).toBe("conflict");
   });
 
   it("cancels active tool processes and persists their terminal evidence", async () => {
@@ -503,7 +605,7 @@ function projectRepository(
   };
 }
 
-function harnessRepository(harnesses: readonly HarnessManifest[], activeHarnessId: HarnessId): HarnessRepository {
+function harnessRepository(harnesses: readonly HarnessManifest[], activeHarness: { id: HarnessId }): HarnessRepository {
   return {
     async putComponent() { return { ok: false, error: validationError("unused") }; },
     async putHarness(manifest) { return { ok: true, value: manifest }; },
@@ -512,8 +614,8 @@ function harnessRepository(harnesses: readonly HarnessManifest[], activeHarnessI
       return harness === undefined ? notFound("harness", id) : { ok: true, value: harness };
     },
     async getActiveHarness() {
-      const harness = harnesses.find((candidate) => candidate.id === activeHarnessId);
-      return harness === undefined ? notFound("harness", activeHarnessId) : { ok: true, value: harness };
+      const harness = harnesses.find((candidate) => candidate.id === activeHarness.id);
+      return harness === undefined ? notFound("harness", activeHarness.id) : { ok: true, value: harness };
     },
     async listProjectHarnesses() { return { ok: true, value: { items: harnesses, nextCursor: null } }; },
   };

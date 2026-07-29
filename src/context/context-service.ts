@@ -23,6 +23,7 @@ const MAX_INSTRUCTION_FILES = 64;
 const MAX_INSTRUCTION_BYTES = 64 * 1024;
 const MAX_TOTAL_INSTRUCTION_BYTES = 256 * 1024;
 const MAX_INSTALLED_SKILLS = 128;
+const MAX_WORKSPACE_FILES = 4_096;
 const MAX_SKILL_BYTES = 256 * 1024;
 const MAX_BOOTSTRAP_BYTES = 512 * 1024;
 const MAX_SKILL_NAME_CHARS = 120;
@@ -43,6 +44,8 @@ export const createContextService: CreateContextService = ({ objects, knowledge,
     }
     const instructions = await discoverInstructions(workspace);
     if (!instructions.ok) return instructions;
+    const inventory = await discoverWorkspaceInventory(workspace);
+    if (!inventory.ok) return inventory;
     const knowledgeCatalog = await knowledge.catalog({
       projectId: workspace.projectId,
       text: "",
@@ -55,6 +58,8 @@ export const createContextService: CreateContextService = ({ objects, knowledge,
     if (!skillCatalog.ok) return skillCatalog;
     const value = {
       instructions: instructions.value,
+      workspaceFiles: inventory.value.files,
+      workspaceInventoryTruncated: inventory.value.truncated,
       knowledgeCatalog: knowledgeCatalog.value,
       skillCatalog: skillCatalog.value,
     };
@@ -77,6 +82,46 @@ export const createContextService: CreateContextService = ({ objects, knowledge,
     return readSkillDocument(objects, component);
   },
 });
+
+async function discoverWorkspaceInventory(workspace: WorkspaceRecord): Promise<Result<{
+  readonly files: readonly RelativePath[];
+  readonly truncated: boolean;
+}, ContextError>> {
+  const files: string[] = [];
+
+  async function visit(absoluteDirectory: string, relativeDirectory: string): Promise<Result<void, ContextError>> {
+    let entries;
+    try {
+      entries = await readdir(absoluteDirectory, { withFileTypes: true });
+    } catch (error) {
+      return io("discover workspace inventory", error);
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (files.length > MAX_WORKSPACE_FILES) break;
+      const relative = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+      if (entry.isFile() && !entry.isSymbolicLink()) {
+        files.push(relative);
+        continue;
+      }
+      if (!entry.isDirectory() || entry.isSymbolicLink() || IGNORED_DIRECTORIES.has(entry.name)) continue;
+      const nested = await visit(join(absoluteDirectory, entry.name), relative);
+      if (!nested.ok) return nested;
+    }
+    return { ok: true, value: undefined };
+  }
+
+  const visited = await visit(String(workspace.path), "");
+  if (!visited.ok) return visited;
+  files.sort((left, right) => left.localeCompare(right));
+  return {
+    ok: true,
+    value: {
+      files: files.slice(0, MAX_WORKSPACE_FILES) as RelativePath[],
+      truncated: files.length > MAX_WORKSPACE_FILES,
+    },
+  };
+}
 
 async function discoverInstructions(workspace: WorkspaceRecord): Promise<Result<readonly ProjectInstruction[], ContextError>> {
   const instructions: ProjectInstruction[] = [];

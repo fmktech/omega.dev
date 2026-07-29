@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write TypeScript Tests"
+  short_description: "Author mutation-resistant TypeScript tests"
+  default_prompt: "Use $write-tests-typescript to build a high-confidence test suite for this TypeScript module."

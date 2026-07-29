@@ -21,13 +21,14 @@ import type {
   RunnerStart,
   RunnerToKernelEnvelope,
   SessionId,
+  ValidationError,
 } from "../contracts/index.js";
 import { encodeJsonLine } from "../shared/core.js";
 
 const PROTOCOL = "omega-runner-jsonl";
 const VERSION = 1;
 const MAX_LINE_BYTES = 1024 * 1024;
-const READY_POLLS = 100;
+const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_DELAY_MS = 10;
 const REQUEST_KINDS: ReadonlySet<string> = new Set([
   "context.bootstrap", "skill.read", "model.start", "process.start", "process.observe", "process.input", "process.cancel", "artifact.read", "file.read",
@@ -75,7 +76,7 @@ export const createRunnerHost: CreateRunnerHost = (processes, harnesses) => {
         return validation("Runner component cannot use the document runtime", "harness.components.runner.runtime");
       }
       const spec = runnerProcessSpec(start, runner.runtime, runner.entrypoint, runner.credentialEnvNames);
-      const launched = await processes.start(spec, start.session.capabilityEnvelope);
+      const launched = await processes.startRunner(spec, start.session.capabilityEnvelope);
       if (!launched.ok) {
         return launched;
       }
@@ -104,7 +105,8 @@ export const createRunnerHost: CreateRunnerHost = (processes, harnesses) => {
         await processes.cancel(launched.value.id, "runner start envelope failed");
         return started;
       }
-      for (let attempt = 0; attempt < READY_POLLS; attempt += 1) {
+      const readyDeadline = Date.now() + READY_TIMEOUT_MS;
+      while (Date.now() < readyDeadline) {
         const observed = await poll(processes, state);
         if (!observed.ok) {
           states.delete(start.session.id);
@@ -124,11 +126,14 @@ export const createRunnerHost: CreateRunnerHost = (processes, harnesses) => {
           states.delete(start.session.id);
           return protocol("Runner exited before completing the ready handshake");
         }
-        await delay(READY_POLL_DELAY_MS);
+        await delay(Math.min(READY_POLL_DELAY_MS, Math.max(1, readyDeadline - Date.now())));
       }
       states.delete(start.session.id);
       await processes.cancel(launched.value.id, "runner ready handshake timed out");
-      return protocol("Runner did not complete the ready handshake");
+      const detail = state.stderrTail.trim();
+      return protocol(detail.length === 0
+        ? "Runner did not complete the ready handshake within 15000ms"
+        : `Runner did not complete the ready handshake within 15000ms: ${detail}`);
     },
 
     async send(sessionId, envelope) {
@@ -287,6 +292,22 @@ function acceptLine(state: RunnerState, line: string, processes: ProcessSupervis
     parsed = JSON.parse(line) as JsonValue;
   } catch {
     state.received.push(protocolEnvelope("Runner stdout contains malformed JSONL"));
+    return;
+  }
+  if (isObject(parsed) && parsed["protocol"] === PROTOCOL && parsed["version"] === VERSION
+    && isObject(parsed["message"]) && parsed["message"]["kind"] === "runner.request"
+    && isObject(parsed["message"]["request"]) && isId(parsed["message"]["request"]["requestId"])
+    && !isRunnerRequest(parsed["message"]["request"])) {
+    const requestId = parsed["message"]["request"]["requestId"] as RequestId;
+    const rejection: KernelToRunnerEnvelope = {
+      protocol: PROTOCOL,
+      version: VERSION,
+      message: {
+        kind: "kernel.reply",
+        reply: { kind: "request.rejected", requestId, error: malformedRequestError() },
+      },
+    };
+    void writeEnvelope(processes, state, rejection);
     return;
   }
   const envelope = parseRunnerEnvelope(parsed);
@@ -701,6 +722,16 @@ function protocolError(message: string): ProtocolError {
 
 function mismatchError(expected: HarnessId, active: HarnessId): HarnessVersionMismatchError {
   return { kind: "harness-version-mismatch", expected, active, recoverable: true, callerAction: "refresh-version-and-retry" };
+}
+
+function malformedRequestError(): ValidationError {
+  return {
+    kind: "validation",
+    message: "Runner request arguments do not match the declared kernel contract",
+    field: "request",
+    recoverable: true,
+    callerAction: "fix-request",
+  };
 }
 
 function mismatch(expected: HarnessId, active: HarnessId): Result<never, HarnessError> {

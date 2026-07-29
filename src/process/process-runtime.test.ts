@@ -495,6 +495,43 @@ describe("process supervisor lifecycle bounds", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("runs daemon-owned runners outside the tool-process budget while keeping tool starts denied", async () => {
+    const envelope: CapabilityEnvelope = {
+      ...capabilities(["read-files"]),
+      maxProcessStarts: 0,
+      wallTimeMs: 60_000 as DurationMs,
+      createdAt: new Date().toISOString() as Timestamp,
+    };
+    const backend = new FakeBackend();
+    const supervisor = createProcessSupervisor({
+      config: DEFAULT_CONFIG.processes,
+      environment: {},
+      projects: repository(root),
+      sessions: sessionRepository(envelope),
+      objects: new MemoryObjectStore(),
+      policy: allowPolicy(),
+      backend,
+    });
+    const baseSpec = processSpec(root);
+    const runnerSpec: ProcessSpec = {
+      ...baseSpec,
+      stdin: "pipe",
+      sandbox: { ...baseSpec.sandbox, filesystem: "workspace-read-only" },
+    };
+
+    const runner = await supervisor.startRunner(runnerSpec, envelope);
+    expect(runner.ok).toBe(true);
+    if (!runner.ok) return;
+    expect((await supervisor.input(runner.value.id, { kind: "data", encoding: "utf8", data: "{}\n" })).ok).toBe(true);
+
+    const tool = await supervisor.start(runnerSpec, envelope);
+    expect(tool.ok).toBe(false);
+    if (!tool.ok) {
+      expect(tool.error.kind).toBe("budget-exceeded");
+      if (tool.error.kind === "budget-exceeded") expect(tool.error.budget).toBe("processes");
+    }
+  });
+
   it("holds an escalated process start until the policy resolution allows it", async () => {
     const envelope = processCapabilities();
     const spec = processSpec(root);

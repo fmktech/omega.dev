@@ -48,6 +48,7 @@ type ProcessRuntimeDependencies = {
 };
 
 type ActiveProcess = {
+  readonly owner: "runner" | "tool";
   readonly handle: ProcessHandle;
   readonly spec: ProcessSpec;
   readonly capabilities: CapabilityEnvelope;
@@ -312,81 +313,98 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
     });
   }
 
-  return {
-    async start(spec, capabilities) {
-      if (active.size >= options.config.maxConcurrent) {
-        return { ok: false, error: { kind: "budget-exceeded", budget: "processes", limit: options.config.maxConcurrent, observed: active.size + 1, recoverable: false, callerAction: "abort" } };
-      }
-      const elapsed = Date.now() - Date.parse(String(capabilities.createdAt));
-      if (!Number.isFinite(elapsed) || elapsed > Number(capabilities.wallTimeMs)) {
-        return { ok: false, error: { kind: "budget-exceeded", budget: "wall-time", limit: Number(capabilities.wallTimeMs), observed: elapsed, recoverable: false, callerAction: "abort" } };
-      }
-      const previousStarts = startsBySession.get(String(spec.sessionId)) ?? 0;
-      if (previousStarts >= capabilities.maxProcessStarts) {
-        return { ok: false, error: { kind: "budget-exceeded", budget: "processes", limit: capabilities.maxProcessStarts, observed: previousStarts + 1, recoverable: false, callerAction: "abort" } };
-      }
+  async function startProcess(
+    owner: ActiveProcess["owner"],
+    spec: ProcessSpec,
+    capabilities: CapabilityEnvelope,
+  ): Promise<Result<ProcessHandle, ProcessError>> {
+    if (active.size >= options.config.maxConcurrent) {
+      return { ok: false, error: { kind: "budget-exceeded", budget: "processes", limit: options.config.maxConcurrent, observed: active.size + 1, recoverable: false, callerAction: "abort" } };
+    }
+    const elapsed = Date.now() - Date.parse(String(capabilities.createdAt));
+    if (!Number.isFinite(elapsed) || elapsed > Number(capabilities.wallTimeMs)) {
+      return { ok: false, error: { kind: "budget-exceeded", budget: "wall-time", limit: Number(capabilities.wallTimeMs), observed: elapsed, recoverable: false, callerAction: "abort" } };
+    }
+    const previousStarts = startsBySession.get(String(spec.sessionId)) ?? 0;
+    if (owner === "tool" && previousStarts >= capabilities.maxProcessStarts) {
+      return { ok: false, error: { kind: "budget-exceeded", budget: "processes", limit: capabilities.maxProcessStarts, observed: previousStarts + 1, recoverable: false, callerAction: "abort" } };
+    }
+    if (owner === "tool") {
       const capabilityError = validateStartCapabilities(spec, capabilities);
       if (capabilityError !== null) return { ok: false, error: capabilityError };
-      for (const name of spec.credentialEnvNames) {
-        if (options.environment[String(name)] === undefined) {
-          return { ok: false, error: { kind: "validation", field: "credentialEnvNames", message: `Credential ${String(name)} is not available`, recoverable: true, callerAction: "fix-request" } };
-        }
+    }
+    for (const name of spec.credentialEnvNames) {
+      if (options.environment[String(name)] === undefined) {
+        return { ok: false, error: { kind: "validation", field: "credentialEnvNames", message: `Credential ${String(name)} is not available`, recoverable: true, callerAction: "fix-request" } };
       }
-      const session = await options.sessions.get(spec.sessionId);
-      if (!session.ok) return { ok: false, error: ioError("session.get-for-process-start") };
-      const workspace = await options.projects.getWorkspace(session.value.header.workspaceId);
-      if (!workspace.ok) return { ok: false, error: ioError("workspace.get-for-process-start") };
-      if (!pathIsWithin(String(workspace.value.path), String(spec.cwd))) {
-        return {
-          ok: false,
-          error: {
-            kind: "validation",
-            field: "cwd",
-            message: "Working directory must remain inside the session workspace",
-            recoverable: true,
-            callerAction: "fix-request",
-          },
-        };
-      }
+    }
+    const session = await options.sessions.get(spec.sessionId);
+    if (!session.ok) return { ok: false, error: ioError("session.get-for-process-start") };
+    const workspace = await options.projects.getWorkspace(session.value.header.workspaceId);
+    if (!workspace.ok) return { ok: false, error: ioError("workspace.get-for-process-start") };
+    if (!pathIsWithin(String(workspace.value.path), String(spec.cwd))) {
+      return {
+        ok: false,
+        error: {
+          kind: "validation",
+          field: "cwd",
+          message: "Working directory must remain inside the session workspace",
+          recoverable: true,
+          callerAction: "fix-request",
+        },
+      };
+    }
+    if (owner === "tool") {
       const policyError = await authorize(spec.sessionId, capabilities, processFacts(spec));
       if (policyError !== null) return { ok: false, error: policyError };
-      const backend = await backendPromise;
-      if (!backend.ok) return backend;
-      const processId = randomUUID() as ProcessId;
-      const launched = await backend.value.launch({ processId, spec, workspacePath: workspace.value.path });
-      if (!launched.ok) return launched;
-      const handle: ProcessHandle = {
-        id: processId,
-        state: "running",
-        harnessId: spec.harnessId,
-        sandbox: launched.value.identity,
-        startedAt: timestamp(),
-      };
-      const partial: Omit<ActiveProcess, "completion"> = {
-        handle,
-        spec,
-        capabilities,
-        child: launched.value,
-        stdout: [],
-        stderr: [],
-        state: "running",
-        desiredTerminalState: null,
-        timeout: null,
-      };
-      launched.value.process.stdout?.on("data", (chunk: Buffer) => partial.stdout.push(Buffer.from(chunk)));
-      launched.value.process.stderr?.on("data", (chunk: Buffer) => partial.stderr.push(Buffer.from(chunk)));
-      const completion = attachCompletion(partial);
-      const record = Object.assign(partial, { completion }) as ActiveProcess;
-      if (spec.timeoutMs !== null) {
-        record.timeout = setTimeout(() => {
-          record.desiredTerminalState = "cancelled";
-          void record.child.signal("SIGTERM");
-          setTimeout(() => { if (active.has(processId)) void record.child.signal("SIGKILL"); }, Number(options.config.gracefulShutdownMs));
-        }, Number(spec.timeoutMs));
-      }
-      active.set(processId, record);
-      startsBySession.set(String(spec.sessionId), previousStarts + 1);
-      return { ok: true, value: handle };
+    }
+    const backend = await backendPromise;
+    if (!backend.ok) return backend;
+    const processId = randomUUID() as ProcessId;
+    const launched = await backend.value.launch({ processId, spec, workspacePath: workspace.value.path });
+    if (!launched.ok) return launched;
+    const handle: ProcessHandle = {
+      id: processId,
+      state: "running",
+      harnessId: spec.harnessId,
+      sandbox: launched.value.identity,
+      startedAt: timestamp(),
+    };
+    const partial: Omit<ActiveProcess, "completion"> = {
+      owner,
+      handle,
+      spec,
+      capabilities,
+      child: launched.value,
+      stdout: [],
+      stderr: [],
+      state: "running",
+      desiredTerminalState: null,
+      timeout: null,
+    };
+    launched.value.process.stdout?.on("data", (chunk: Buffer) => partial.stdout.push(Buffer.from(chunk)));
+    launched.value.process.stderr?.on("data", (chunk: Buffer) => partial.stderr.push(Buffer.from(chunk)));
+    const completion = attachCompletion(partial);
+    const record = Object.assign(partial, { completion }) as ActiveProcess;
+    if (spec.timeoutMs !== null) {
+      record.timeout = setTimeout(() => {
+        record.desiredTerminalState = "cancelled";
+        void record.child.signal("SIGTERM");
+        setTimeout(() => { if (active.has(processId)) void record.child.signal("SIGKILL"); }, Number(options.config.gracefulShutdownMs));
+      }, Number(spec.timeoutMs));
+    }
+    active.set(processId, record);
+    if (owner === "tool") startsBySession.set(String(spec.sessionId), previousStarts + 1);
+    return { ok: true, value: handle };
+  }
+
+  return {
+    async startRunner(spec, capabilities) {
+      return startProcess("runner", spec, capabilities);
+    },
+
+    async start(spec, capabilities) {
+      return startProcess("tool", spec, capabilities);
     },
 
     async observe(processId, after) {
@@ -419,10 +437,12 @@ export function createProcessSupervisor(options: ProcessRuntimeDependencies): Pr
     async input(processId, input) {
       const record = active.get(processId);
       if (record === undefined) return { ok: false, error: notRunning(processId, completed.get(processId)?.state ?? "interrupted") };
-      if (!hasCapability(record.capabilities, "process-input")) return { ok: false, error: denied("process-input", "The session cannot control process input") };
-      const facts: ActionFacts = { kind: "process-input", processId, input: { ...input } };
-      const policyError = await authorize(record.spec.sessionId, record.capabilities, facts);
-      if (policyError !== null) return { ok: false, error: policyError };
+      if (record.owner === "tool") {
+        if (!hasCapability(record.capabilities, "process-input")) return { ok: false, error: denied("process-input", "The session cannot control process input") };
+        const facts: ActionFacts = { kind: "process-input", processId, input: { ...input } };
+        const policyError = await authorize(record.spec.sessionId, record.capabilities, facts);
+        if (policyError !== null) return { ok: false, error: policyError };
+      }
       if (input.kind === "close-stdin") {
         record.child.closeStdin();
         return { ok: true, value: { acceptedBytes: bytes(0) } };

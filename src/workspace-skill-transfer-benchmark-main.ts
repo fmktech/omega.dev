@@ -17,7 +17,7 @@ import type {
   SessionId,
   Timestamp,
 } from "./contracts/index.js";
-import { REFLECTION_SCENARIOS, runReflectionScenario } from "./evolution/reflection-benchmark.js";
+import { REFLECTION_SCENARIOS, runReflectionScenarioWithRetries } from "./evolution/reflection-benchmark.js";
 import type { InstalledTransferSkill } from "./evolution/reflection-skill-transfer-benchmark.js";
 import { createReflectionSkillCandidate } from "./evolution/reflection-skills.js";
 import {
@@ -52,18 +52,17 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   const objects = createFileObjectStore(root);
   const models = createModelRouter(DEFAULT_CONFIG.models, process.env);
   process.stderr.write(`workspace-skill-transfer: reflecting with ${modelId("crystallizer")}\n`);
-  let reflectionAttempts = 1;
-  let reflected = await runReflectionScenario(models, sourceScenario);
-  while (!reflected.ok && reflected.error.kind === "validation"
-    && reflected.error.field?.startsWith("modelOutput") === true && reflectionAttempts < 3) {
-    reflectionAttempts += 1;
-    process.stderr.write(`workspace-skill-transfer: retrying structurally invalid reflection (${reflectionAttempts}/3)\n`);
-    reflected = await runReflectionScenario(models, sourceScenario);
-  }
-  if (!reflected.ok) {
-    process.stderr.write(`${JSON.stringify(reflected.error)}\n`);
+  const reflectedAttempt = await runReflectionScenarioWithRetries(models, sourceScenario, {
+    onRetry(retry, nextAttempt, maxAttempts) {
+      process.stderr.write(`workspace-skill-transfer: retrying ${retry.reason} reflection (${nextAttempt}/${maxAttempts})\n`);
+    },
+  });
+  if (!reflectedAttempt.ok) {
+    process.stderr.write(`${JSON.stringify(reflectedAttempt.error)}\n`);
     return 3;
   }
+  const reflected = { ok: true, value: reflectedAttempt.value.run } as const;
+  const reflectionAttempts = reflectedAttempt.value.attempts;
   const incumbent: HarnessManifest = {
     id: INCUMBENT_ID,
     projectId: PROJECT_ID,
@@ -148,10 +147,11 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   const summary = summarizeWorkspaceSkillPairs(pairs, replicates * WORKSPACE_SKILL_SCENARIOS.length);
   const record = {
     kind: "workspace-skill-transfer-benchmark",
-    version: 4,
+    version: 5,
     status: failure === null ? "completed" : "partial",
     methodology: {
       selectionPolicy: "none",
+      reflectionScorerVersion: 2,
       evaluationFeedbackToReflection: false,
       automaticActivation: false,
       taskSurface: "real UTF-8 files, SHA-interlocked writes, and one network-disabled OCI process per command",
@@ -162,6 +162,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
     },
     sourceScenarioId: sourceScenario.id,
     reflectionAttempts,
+    reflectionRetries: reflectedAttempt.value.retries,
     reflection: reflected.value,
     incumbentHarnessId: incumbent.id,
     candidateHarnessId: candidate.value.id,

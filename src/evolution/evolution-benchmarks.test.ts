@@ -414,6 +414,10 @@ function foundryFixture(variation: "near-transfer" | "generalization" | "negativ
     checks: variation === "negative-control"
       ? [{ path: "docs/auth.md", contains: "troubleshooting" }]
       : [{ path: "config/service.toml", contains: variation === "near-transfer" ? "45" : "7" }],
+    verifier: {
+      files: { "verify.mjs": "import assert from 'node:assert/strict';\nassert.ok(true);\n" },
+      command: { executable: "node", args: ["verify.mjs"] },
+    },
     invariants: variation === "negative-control"
       ? [{ path: "config/service.toml", equals: "timeout = 30\nlockout = 5\n" }]
       : [{ path: "docs/auth.md", equals: "# Auth\n" }],
@@ -599,6 +603,8 @@ describe("paired promotion evaluation", () => {
     try {
       const suite = skillEvalSuite();
       const execute = vi.fn<BenchmarkRunLauncher["execute"]>(async (request) => {
+        expect(request.route.role).toBe("main-coder");
+        expect(request.route.modelId).toBe("deepseek/deepseek-v4-flash");
         const isCandidate = request.harness.id === candidateId;
         const privateTask = request.privateTask as SkillEvalSuite["privateTasks"][number];
         expect(privateTask.skillComponentIds).toEqual(["component-foundry-skill"]);
@@ -852,20 +858,30 @@ describe("evolution lifecycle", () => {
   it("builds a skill and an unseen three-fixture suite in isolated children before paired evaluation", async () => {
     const root = await mkdtemp(join(tmpdir(), "omega-skill-foundry-lifecycle-"));
     try {
-      const evidenceArtifactId = "conversation-evidence" as ArtifactId;
+      const sourceSessionId = "source" as SessionId;
       const builderSessionId = "evolution-session" as SessionId;
       const evaluatorSessionId = "evaluation-session" as SessionId;
+      const repairSessionId = "evaluation-repair-session" as SessionId;
+      const secondRepairSessionId = "evaluation-second-repair-session" as SessionId;
       const reflection = JSON.stringify({
         reflection: "The correction established a durable generated-config workflow.",
         decision: "evolve",
         lessons: [{
-          sourceIds: [evidenceArtifactId],
+          sourceIds: [],
           target: "skill",
           title: "Regenerate authentication configuration",
           guidance: "Edit config/service.toml, run tools/render-config, then ./verify-auth.",
           relevantPaths: ["config/service.toml", "tools/render-config", "verify-auth"],
           appliesWhen: ["Authentication configuration changes"],
           doesNotApplyWhen: ["Documentation-only changes"],
+          observableContracts: [{
+            operation: "authentication configuration regeneration",
+            inputs: ["edit config/service.toml"],
+            outputs: ["runtime authentication configuration is regenerated"],
+            errors: ["none"],
+            sideEffects: ["tools/render-config rewrites generated configuration"],
+            exactValues: ["config/service.toml", "tools/render-config", "./verify-auth"],
+          }],
         }],
       });
       const suiteProposal = JSON.stringify({ fixtures: [
@@ -873,9 +889,28 @@ describe("evolution lifecycle", () => {
         foundryFixture("generalization", "Change lockout to 7."),
         foundryFixture("negative-control", "Add a troubleshooting note."),
       ] });
+      const invalidSuiteProposal = JSON.stringify({ fixtures: [
+        { ...foundryFixture("near-transfer", "Change timeout to 45."), verifier: {
+          files: {},
+          command: { executable: "node", args: ["verify.mjs"] },
+        } },
+        foundryFixture("generalization", "Change lockout to 7."),
+        foundryFixture("negative-control", "Add a troubleshooting note."),
+      ] });
+      const invalidInvariantProposal = JSON.stringify({ fixtures: [
+        foundryFixture("near-transfer", "Change timeout to 45."),
+        {
+          ...foundryFixture("generalization", "Change lockout to 7."),
+          files: { "config/service.toml": "timeout = 30\nlockout = 5\n", "docs/auth.md": "" },
+          invariants: [{ path: "docs/auth.md", contains: "Authentication" }],
+        },
+        foundryFixture("negative-control", "Add a troubleshooting note."),
+      ] });
       const events = new Map<SessionId, readonly SessionEvent[]>([
         [builderSessionId, textEvents(reflection, builderSessionId, "builder-proposal" as ArtifactId)],
-        [evaluatorSessionId, textEvents(suiteProposal, evaluatorSessionId, "suite-proposal" as ArtifactId)],
+        [evaluatorSessionId, textEvents(invalidSuiteProposal, evaluatorSessionId, "suite-proposal" as ArtifactId)],
+        [repairSessionId, textEvents(invalidInvariantProposal, repairSessionId, "suite-repair" as ArtifactId)],
+        [secondRepairSessionId, textEvents(suiteProposal, secondRepairSessionId, "suite-second-repair" as ArtifactId)],
       ]);
       const repository: SessionRepository = {
         create: () => rejectUnexpected(),
@@ -886,16 +921,25 @@ describe("evolution lifecycle", () => {
         recordArtifact: () => rejectUnexpected(),
         readArtifact: () => rejectUnexpected(),
       };
-      const spawnChild = vi.fn<SessionService["spawnChild"]>(async (request) => ({ ok: true, value: {
-        childId: (request.role === "evolution" ? "builder-child" : "evaluator-child") as ChildId,
-        sessionId: request.role === "evolution" ? builderSessionId : evaluatorSessionId,
+      let evaluatorSpawns = 0;
+      const spawnChild = vi.fn<SessionService["spawnChild"]>(async (request) => {
+        if (request.role === "promotion-eval") evaluatorSpawns += 1;
+        const evaluationSession = evaluatorSpawns === 1
+          ? evaluatorSessionId
+          : evaluatorSpawns === 2 ? repairSessionId : secondRepairSessionId;
+        return { ok: true, value: {
+        childId: (request.role === "evolution" ? "builder-child" : `evaluator-child-${evaluatorSpawns}`) as ChildId,
+        sessionId: request.role === "evolution" ? builderSessionId : evaluationSession,
         parentSessionId: request.parentSessionId,
         spawnEventId: `${request.role}-spawn` as EventId,
         role: request.role,
         state: "running",
-      } }));
+      } };
+      });
       const runSkillPaired = vi.fn<BenchmarkService["runSkillPaired"]>(async (suite, _incumbent, candidate) => {
         expect(suite.privateTasks.map((task) => task.variation)).toEqual(["near-transfer", "generalization", "negative-control"]);
+        expect(suite.manifest.tasks.every((task) => task.budget.maxProcessStarts
+          === DEFAULT_CONFIG.benchmarks.syntheticSkillTaskBudget.maxProcessStarts)).toBe(true);
         return { ok: true, value: rejectedScorecard(candidate) };
       });
       const runPaired = vi.fn<BenchmarkService["runPaired"]>(() => rejectUnexpected());
@@ -911,12 +955,19 @@ describe("evolution lifecycle", () => {
 
       const started = await service.start({
         projectId,
-        sourceSessionId: "source" as SessionId,
+        sourceSessionId,
         goal: "Crystallize the authentication workflow when it helps future work.",
-        evidenceArtifactIds: [evidenceArtifactId],
+        evidenceArtifactIds: [],
         allowedComponentKinds: ["skill"],
         evaluationMode: "synthetic-skill-suite",
-        budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+        budget: {
+          wallTimeMs: 60_000 as DurationMs,
+          maxModelCalls: 2,
+          maxInputTokens: 8_000 as TokenCount,
+          maxOutputTokens: 2_000 as TokenCount,
+          maxCostUsdMicros: 0 as UsdMicros,
+          maxProcessStarts: 1,
+        },
       } as EvolutionRequest & { readonly evaluationMode: "synthetic-skill-suite" }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
       expect(started.ok).toBe(true);
       if (!started.ok) return;
@@ -924,12 +975,118 @@ describe("evolution lifecycle", () => {
       const terminal = await waitForEvolutionTerminal(service, started.value.id);
 
       expect(terminal.ok && terminal.value.state).toBe("rejected");
-      expect(spawnChild).toHaveBeenCalledTimes(2);
-      expect(spawnChild.mock.calls.map((call) => call[0].role)).toEqual(["evolution", "promotion-eval"]);
+      expect(spawnChild).toHaveBeenCalledTimes(4);
+      expect(spawnChild.mock.calls.map((call) => call[0].role)).toEqual(["evolution", "promotion-eval", "promotion-eval", "promotion-eval"]);
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain(sourceSessionId);
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain("exact signatures");
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain("observableContracts");
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain("must return the reflection JSON");
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain("Raw component deltas and hand-authored SKILL.md documents are invalid");
+      expect(spawnChild.mock.calls[0]?.[0].objective).toContain("Do not call artifact.read");
+      expect(spawnChild.mock.calls[0]?.[0].capabilityEnvelope.grants).toEqual([]);
+      expect(spawnChild.mock.calls[0]?.[0].capabilityEnvelope.maxProcessStarts).toBe(0);
       expect(spawnChild.mock.calls[0]?.[0].objective).not.toContain("negative-control");
       expect(spawnChild.mock.calls[1]?.[0].objective).not.toContain("SKILL.md");
+      expect(spawnChild.mock.calls[1]?.[0].objective).not.toContain("artifact.read");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("Do not call any tool");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("at most three starting files");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("at most six baseline checks");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("must not request a complete application");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("JSON object mapping safe relative path keys directly to string contents, never an array");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("authoritative hidden behavioral test");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("Equivalent implementations must pass");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("offline and read-only");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("full-workspace replay");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("explicit doesNotApplyWhen cue");
+      expect(spawnChild.mock.calls[1]?.[0].objective).toContain("none of the positive learned contracts");
+      expect(spawnChild.mock.calls[2]?.[0].objective).toContain("Repair your previous synthetic fixture proposal");
+      expect(spawnChild.mock.calls[2]?.[0].objective).toContain("fixtures.0.verifier.files");
+      expect(spawnChild.mock.calls[2]?.[0].objective).toContain("Do not call any tool");
+      expect(spawnChild.mock.calls[2]?.[0].objective).toContain("JSON object mapping safe relative path keys directly to string contents, never an array");
+      expect(spawnChild.mock.calls[2]?.[0].objective).not.toContain("candidateHarnessId");
+      expect(spawnChild.mock.calls[3]?.[0].objective).toContain("fixtures.1.invariants");
       expect(runSkillPaired).toHaveBeenCalledOnce();
       expect(runPaired).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a raw SKILL.md delta in synthetic skill evolution before candidate creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-skill-foundry-raw-delta-"));
+    try {
+      const builderSessionId = "evolution-session" as SessionId;
+      const evaluatorSessionId = "raw-delta-evaluation-session" as SessionId;
+      const suiteProposal = JSON.stringify({ fixtures: [
+        foundryFixture("near-transfer", "Change timeout to 45."),
+        foundryFixture("generalization", "Change lockout to 7."),
+        foundryFixture("negative-control", "Add a troubleshooting note."),
+      ] });
+      const events = new Map<SessionId, readonly SessionEvent[]>([
+        [builderSessionId, mutationEvents("# Hand-authored skill without frontmatter")],
+        [evaluatorSessionId, textEvents(suiteProposal, evaluatorSessionId, "raw-delta-suite" as ArtifactId)],
+      ]);
+      const repository: SessionRepository = {
+        create: () => rejectUnexpected(),
+        get: async (id) => ({ ok: true, value: { ...fakeCompletedChildRecord(), header: { ...fakeCompletedChildRecord().header, id } } }),
+        list: () => rejectUnexpected(),
+        append: () => rejectUnexpected(),
+        read: async (id, afterSequence, limit) => ({ ok: true, value: (events.get(id) ?? []).filter((event) => event.sequence > afterSequence).slice(0, limit) }),
+        recordArtifact: () => rejectUnexpected(),
+        readArtifact: () => rejectUnexpected(),
+      };
+      const spawnChild = vi.fn<SessionService["spawnChild"]>(async (request) => ({ ok: true, value: {
+        childId: `${request.role}-child` as ChildId,
+        sessionId: request.role === "evolution" ? builderSessionId : evaluatorSessionId,
+        parentSessionId: request.parentSessionId,
+        spawnEventId: `${request.role}-spawn` as EventId,
+        role: request.role,
+        state: "running",
+      } }));
+      const baseHarnesses = fakeHarnessRepository([harness(incumbentId)]);
+      const putHarness = vi.fn(baseHarnesses.putHarness);
+      const runSkillPaired = vi.fn<BenchmarkService["runSkillPaired"]>(() => rejectUnexpected());
+      const service = createEvolutionService({
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(),
+        repository,
+        sessions: fakeSessionService({
+          spawnChild,
+          complete: async () => ({ ok: true, value: fakeCompletedChildRecord() }),
+        }),
+        harnesses: { ...baseHarnesses, putHarness },
+        benchmarks: { ...fakeBenchmarkService(), runSkillPaired },
+        activation: fakeActivation(),
+      });
+
+      const started = await service.start({
+        projectId,
+        sourceSessionId: "source" as SessionId,
+        goal: "Crystallize the learned workflow.",
+        evidenceArtifactIds: [],
+        allowedComponentKinds: ["skill"],
+        evaluationMode: "synthetic-skill-suite",
+        budget: {
+          wallTimeMs: 60_000 as DurationMs,
+          maxModelCalls: 2,
+          maxInputTokens: 8_000 as TokenCount,
+          maxOutputTokens: 2_000 as TokenCount,
+          maxCostUsdMicros: 0 as UsdMicros,
+          maxProcessStarts: 1,
+        },
+      }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      const terminal = await waitForEvolutionTerminal(service, started.value.id);
+      expect(terminal.ok && terminal.value.state).toBe("failed");
+      expect(terminal.ok && terminal.value.candidateHarnessId).toBeNull();
+      expect(putHarness).not.toHaveBeenCalled();
+      expect(runSkillPaired).not.toHaveBeenCalled();
+      expect(spawnChild.mock.calls.filter((call) => call[0].role === "evolution")).toHaveLength(2);
+      expect(spawnChild.mock.calls.at(-1)?.[0].objective).toContain("Repair your previous reflection proposal");
+      expect(spawnChild.mock.calls.at(-1)?.[0].objective).toContain("Reflection output must contain");
+      expect(spawnChild.mock.calls.at(-1)?.[0].capabilityEnvelope.maxModelCalls).toBe(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -969,6 +1126,17 @@ describe("evolution lifecycle", () => {
             target: "skill",
             title: "Regenerate authentication configuration",
             guidance: "Edit config/service.toml, run tools/render-config, then execute ./verify-auth without touching the web workspace.",
+            relevantPaths: ["config/service.toml", "tools/render-config", "verify-auth", "web"],
+            appliesWhen: ["Authentication configuration changes"],
+            doesNotApplyWhen: ["Documentation-only changes"],
+            observableContracts: [{
+              operation: "authentication configuration regeneration",
+              inputs: ["edit config/service.toml"],
+              outputs: ["runtime authentication configuration is regenerated"],
+              errors: ["none"],
+              sideEffects: ["tools/render-config rewrites generated configuration"],
+              exactValues: ["config/service.toml", "tools/render-config", "./verify-auth", "web"],
+            }],
           }, {
             sourceIds: [evidenceArtifactId],
             target: "knowledge",
@@ -1006,6 +1174,7 @@ describe("evolution lifecycle", () => {
       expect(markdown).toContain("sourceSessionId: source");
       expect(markdown).toContain("conversation-evidence");
       expect(markdown).toContain("tools/render-config");
+      expect(markdown).toContain("## Observable contract ledger");
       expect(storedHarnesses[0]?.parents).toEqual([incumbentId]);
       expect(storedHarnesses[0]?.sourceArtifacts).toEqual([evidenceArtifactId, "mutation-output"]);
       expect(runPaired).toHaveBeenCalledOnce();
@@ -1127,6 +1296,51 @@ describe("evolution lifecycle", () => {
       const listed = await recreated.list(projectId, { cursor: null, limit: 10 });
       expect(loaded).toEqual(terminal);
       expect(listed.ok && listed.value.items).toEqual([terminal.ok ? terminal.value : null]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the structured cause when paired evaluation fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omega-evolution-failure-cause-"));
+    try {
+      const failure = {
+        kind: "validation" as const,
+        message: "Candidate benchmark verifier could not be materialized.",
+        field: "privateTask.verifier",
+        recoverable: true as const,
+        callerAction: "fix-request" as const,
+      };
+      const runPaired = vi.fn<BenchmarkService["runPaired"]>(async () => ({ ok: false, error: failure }));
+      const options = {
+        root: root as AbsolutePath,
+        objects: fakeObjectStore(),
+        repository: fakeSessionRepository(mutationEvents("new learned guidance")),
+        sessions: fakeSessionService({
+          spawnChild: async () => ({ ok: true, value: fakeChildSession() }),
+          complete: async () => ({ ok: true, value: fakeCompletedChildRecord() }),
+        }),
+        harnesses: fakeHarnessRepository([harness(incumbentId)]),
+        benchmarks: { ...fakeBenchmarkService(), runPaired },
+        activation: fakeActivation(),
+      };
+      const service = createEvolutionService(options);
+      const started = await service.start({
+        projectId,
+        sourceSessionId: "source" as SessionId,
+        goal: "retain evaluation failures",
+        evidenceArtifactIds: [],
+        allowedComponentKinds: ["skill"],
+        budget: createOmegaBenchManifest(DEFAULT_CONFIG.benchmarks.developmentPromotionPolicy).tasks[0]!.budget,
+      }, { ...DEFAULT_CONFIG.sessions.mainCapabilities, createdAt: timestamp });
+      expect(started.ok).toBe(true);
+      if (!started.ok) return;
+
+      const terminal = await waitForEvolutionTerminal(service, started.value.id);
+
+      expect(terminal.ok && terminal.value).toMatchObject({ state: "failed", failure });
+      const recreated = createEvolutionService(options);
+      expect(await recreated.get(started.value.id)).toEqual(terminal);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

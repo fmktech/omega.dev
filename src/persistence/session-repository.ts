@@ -8,6 +8,7 @@ import type {
   ObjectStore,
   Page,
   PageRequest,
+  PersistedEventPayload,
   ProjectId,
   Result,
   SessionError,
@@ -16,6 +17,7 @@ import type {
   SessionId,
   SessionRecord,
 } from "../contracts/index.js";
+import { PERSISTED_EVENT_KINDS } from "../contracts/index.js";
 import {
   atomicWriteFile,
   fileExists,
@@ -33,30 +35,19 @@ type SessionIndexEntry = {
   readonly projectId: ProjectId;
 };
 
-const EVENT_KINDS: ReadonlySet<string> = new Set([
-  "session.started",
-  "runner.started",
-  "runner.stopped",
-  "model.started",
-  "model.completed",
-  "model.failed",
+const EVENT_KINDS: ReadonlySet<string> = new Set(Object.keys(PERSISTED_EVENT_KINDS));
+
+// A completed session is immutable as execution history, but it can remain the
+// source of an audited post-session evolution. Only the governance and lineage
+// records required to launch and account for those children may extend its log.
+const POST_TERMINAL_EVENT_KINDS: ReadonlySet<PersistedEventPayload["kind"]> = new Set([
   "policy.decided",
   "policy.escalated",
   "policy.resolved",
-  "process.started",
-  "process.observed",
-  "process.completed",
+  "artifact.recorded",
+  "handoff.created",
   "child.spawned",
   "child.completed",
-  "artifact.recorded",
-  "knowledge.updated",
-  "marketplace.published",
-  "evolution.updated",
-  "benchmark.completed",
-  "harness.updated",
-  "handoff.created",
-  "session.recovered",
-  "session.completed",
 ]);
 
 export const createFileSessionRepository: CreateFileSessionRepository = (root, objects) => ({
@@ -180,7 +171,7 @@ export const createFileSessionRepository: CreateFileSessionRepository = (root, o
           return recordResult;
         }
         const current = recordResult.value;
-        if (current.outcome !== null) {
+        if (current.outcome !== null && !POST_TERMINAL_EVENT_KINDS.has(payload.kind)) {
           return {
             ok: false,
             error: {

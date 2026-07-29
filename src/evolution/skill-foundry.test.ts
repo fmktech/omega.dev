@@ -60,7 +60,32 @@ describe("skill foundry synthetic suite", () => {
     for (const task of result.value.privateTasks) {
       expect(await objects.describe(task.verifierObjectHash)).toMatchObject({ ok: true });
       expect(await objects.describe(task.negativeInvariantObjectHash)).toMatchObject({ ok: true });
+      expect(await storedJson(objects, task.verifierObjectHash)).toMatchObject({
+        executable: {
+          files: { "verify.mjs": expect.stringContaining("node:assert/strict") },
+          command: { executable: "node", args: ["verify.mjs"] },
+        },
+      });
     }
+  });
+
+  it("rejects source-only proxy checks without an executable behavioral verifier", async () => {
+    const withoutVerifier = fixture("near-transfer", "Change the auth timeout to 45.");
+    const { verifier: _verifier, ...sourceOnly } = withoutVerifier;
+    const result = await compileSkillEvalSuite(JSON.stringify({ fixtures: [
+      sourceOnly,
+      fixture("generalization", "Change the auth lockout threshold to 7."),
+      fixture("negative-control", "Add an authentication troubleshooting note."),
+    ] }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result).toMatchObject({ ok: false, error: { kind: "validation", field: "fixtures.0.verifier" } });
   });
 
   it("rejects a suite without one isolated negative control", async () => {
@@ -81,6 +106,132 @@ describe("skill foundry synthetic suite", () => {
 
     expect(result).toMatchObject({ ok: false, error: { kind: "validation", field: "fixtures.variation" } });
   });
+
+  it("does not let a static source sentinel veto an executable behavioral verifier", async () => {
+    const solvedNearTransfer = {
+      ...fixture("near-transfer", "Change the auth timeout to 45."),
+      files: {
+        "config/service.toml": "timeout = 45\nlockout = 5\n",
+        "docs/auth.md": "# Authentication\n",
+      },
+    };
+    const result = await compileSkillEvalSuite(JSON.stringify({
+      fixtures: [
+        solvedNearTransfer,
+        fixture("generalization", "Change the auth lockout threshold to 7."),
+        fixture("negative-control", "Add an authentication troubleshooting note."),
+      ],
+    }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts mixed static diagnostics because they are not the capability oracle", async () => {
+    const partiallySolved = {
+      ...fixture("near-transfer", "Change the auth timeout to 45."),
+      checks: [
+        { path: "config/service.toml", contains: "timeout = 30" },
+        { path: "config/service.toml", contains: "timeout = 45" },
+      ],
+    };
+    const result = await compileSkillEvalSuite(JSON.stringify({ fixtures: [
+      partiallySolved,
+      fixture("generalization", "Change the auth lockout threshold to 7."),
+      fixture("negative-control", "Add an authentication troubleshooting note."),
+    ] }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a fixture whose starting files already violate a negative invariant", async () => {
+    const invalidBaseline = {
+      ...fixture("near-transfer", "Change the auth timeout to 45."),
+      files: {
+        "config/service.toml": "timeout = 30\nlockout = 5\n",
+        "docs/auth.md": "changed before the task\n",
+      },
+    };
+    const result = await compileSkillEvalSuite(JSON.stringify({
+      fixtures: [
+        invalidBaseline,
+        fixture("generalization", "Change the auth lockout threshold to 7."),
+        fixture("negative-control", "Add an authentication troubleshooting note."),
+      ],
+    }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result).toMatchObject({ ok: false, error: { kind: "validation", field: "fixtures.0.invariants" } });
+  });
+
+  it("rejects a no-mutation verifier that hardcodes a collection length", async () => {
+    const unsafe = fixture("near-transfer", "Reject deleting a referenced location without mutating storage.");
+    unsafe.verifier.files["verify.mjs"] = [
+      'import assert from "node:assert/strict";',
+      "const store = { locations: [{ id: 'a' }, { id: 'b' }] };",
+      "assert.strictEqual(store.locations.length, 1, 'Should not have deleted');",
+    ].join("\n");
+    const result = await compileSkillEvalSuite(JSON.stringify({ fixtures: [
+      unsafe,
+      fixture("generalization", "Change the auth lockout threshold to 7."),
+      fixture("negative-control", "Add an authentication troubleshooting note."),
+    ] }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: "validation", field: "fixtures.0.verifier.files.verify.mjs" },
+    });
+  });
+
+  it("accepts a no-mutation verifier that compares against a before-state snapshot", async () => {
+    const safe = fixture("near-transfer", "Reject deleting a referenced location without mutating storage.");
+    safe.verifier.files["verify.mjs"] = [
+      'import assert from "node:assert/strict";',
+      "const store = { locations: [{ id: 'a' }, { id: 'b' }] };",
+      "const beforeLocations = structuredClone(store.locations);",
+      "assert.deepStrictEqual(store.locations, beforeLocations, 'Should not have deleted');",
+    ].join("\n");
+    const result = await compileSkillEvalSuite(JSON.stringify({ fixtures: [
+      safe,
+      fixture("generalization", "Change the auth lockout threshold to 7."),
+      fixture("negative-control", "Add an authentication troubleshooting note."),
+    ] }), {
+      projectId: "project_foundry" as ProjectId,
+      sourceSessionId: "session_source" as SessionId,
+      evidenceArtifactIds: ["artifact_evidence" as ArtifactId],
+      proposalArtifactId: "artifact_suite_proposal" as ArtifactId,
+      budget: benchmarkBudget(),
+      createdAt: NOW,
+    }, memoryObjectStore());
+
+    expect(result.ok).toBe(true);
+  });
 });
 
 function fixture(variation: "near-transfer" | "generalization" | "negative-control", objective: string) {
@@ -96,10 +247,25 @@ function fixture(variation: "near-transfer" | "generalization" | "negative-contr
     checks: variation === "negative-control"
       ? [{ path: "docs/auth.md", contains: "troubleshooting" }]
       : [{ path: "config/service.toml", contains: variation === "near-transfer" ? "45" : "7" }],
+    verifier: {
+      files: {
+        "verify.mjs": `import assert from "node:assert/strict";\nassert.ok(true, ${JSON.stringify(variation)});\n`,
+      },
+      command: { executable: "node", args: ["verify.mjs"] },
+    },
     invariants: variation === "negative-control"
-      ? [{ path: "config/service.toml", equals: "timeout = 30\nlockout = 5\n" }]
+      ? [{ path: "config/service.toml", absent: "secret_override" }]
       : [{ path: "docs/auth.md", equals: "# Authentication\n" }],
   };
+}
+
+async function storedJson(objects: ObjectStore, hash: ObjectHash): Promise<unknown> {
+  const found = await objects.get(hash);
+  expect(found.ok).toBe(true);
+  if (!found.ok) return null;
+  const parts: Uint8Array[] = [];
+  for await (const part of found.value) parts.push(part);
+  return JSON.parse(Buffer.concat(parts).toString("utf8")) as unknown;
 }
 
 function benchmarkBudget() {

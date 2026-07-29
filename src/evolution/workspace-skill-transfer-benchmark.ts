@@ -32,6 +32,10 @@ export type WorkspaceSkillScenario = {
   readonly title: string;
   readonly objective: string;
   readonly skillRelevant: boolean;
+  readonly environment?: "darwin" | "linux";
+  readonly workflowRequired?: boolean;
+  readonly expectedProcessAlternatives?: readonly (readonly string[])[];
+  readonly forbiddenProcessFragments?: readonly string[];
   /** Evaluator-only values are never rendered into model messages. */
   readonly expected: {
     readonly config: string;
@@ -66,6 +70,7 @@ export type WorkspaceSkillRun = {
   readonly processCalls: readonly string[];
   readonly toolErrors: readonly string[];
   readonly completedNaturally: boolean;
+  readonly elapsedMs: number;
   readonly response: string;
   readonly finalFiles: Readonly<Record<string, string>>;
   readonly score: WorkspaceSkillScore;
@@ -127,6 +132,42 @@ test "$actual" = "$expected"
 test "$(cat web/sentinel.txt)" = "web-workspace-must-remain-untouched"
 printf 'authentication verification passed\n'
 `;
+
+export const OPERATIONAL_INTERNALIZATION_SCENARIOS: readonly WorkspaceSkillScenario[] = [
+  {
+    id: "operational-macos-timeout",
+    title: "Apply the host command correction to the next auth change",
+    objective: "On this macOS ARM64 development host, increase the authentication timeout from 30 to 45 seconds. Edit the canonical configuration, regenerate derived runtime configuration, and run ./verify-auth with a 10-second deadline.",
+    skillRelevant: true,
+    environment: "darwin",
+    workflowRequired: true,
+    expectedProcessAlternatives: [["gtimeout 10 ./verify-auth"], ["gtimeout 10 sh ./verify-auth"], ["gtimeout 10 sh verify-auth"]],
+    forbiddenProcessFragments: ["timeout 10 ./verify-auth"],
+    expected: { config: "timeout = 45\nlockout = 5\n", runtime: "{\"timeout\":45,\"lockout\":5}\n", documentation: INITIAL_DOCUMENTATION },
+  },
+  {
+    id: "operational-macos-lockout",
+    title: "Generalize the host command correction in a fresh session",
+    objective: "On this macOS ARM64 development host, change the authentication lockout threshold from 5 to 7. Edit the canonical configuration, regenerate derived runtime configuration, and run ./verify-auth with a 10-second deadline.",
+    skillRelevant: true,
+    environment: "darwin",
+    workflowRequired: true,
+    expectedProcessAlternatives: [["gtimeout 10 ./verify-auth"], ["gtimeout 10 sh ./verify-auth"], ["gtimeout 10 sh verify-auth"]],
+    forbiddenProcessFragments: ["timeout 10 ./verify-auth"],
+    expected: { config: "timeout = 30\nlockout = 7\n", runtime: "{\"timeout\":30,\"lockout\":7}\n", documentation: INITIAL_DOCUMENTATION },
+  },
+  {
+    id: "operational-linux-negative-control",
+    title: "Inhibit the macOS correction in Linux",
+    objective: "Inside this Linux workspace, increase the authentication timeout from 30 to 50 seconds. Edit config/service.toml, regenerate with ./tools/render-config, then run timeout 10 ./verify-auth. The macOS gtimeout convention does not apply inside this Linux environment.",
+    skillRelevant: false,
+    environment: "linux",
+    workflowRequired: true,
+    expectedProcessAlternatives: [["timeout 10 ./verify-auth"], ["timeout 10 sh ./verify-auth"], ["timeout 10 sh verify-auth"]],
+    forbiddenProcessFragments: ["gtimeout"],
+    expected: { config: "timeout = 50\nlockout = 5\n", runtime: "{\"timeout\":50,\"lockout\":5}\n", documentation: INITIAL_DOCUMENTATION },
+  },
+] as const;
 
 export const WORKSPACE_SKILL_SCENARIOS: readonly WorkspaceSkillScenario[] = [
   {
@@ -221,6 +262,7 @@ export function renderWorkspaceSkillPrompt(
           "Use file.read before replacing a file and pass its exact SHA to file.write. Use process.start for project commands. Continue until the requested change is verified.",
           "Inspect the compact installed-skill catalog before acting. If a skill may govern this task, call skill.read exactly once before applying it. If no skill is relevant, do not load one. Never infer omitted procedures from catalog summaries.",
           "When finished, return a short factual summary and the verification actually run.",
+          `Execution environment: ${scenario.environment ?? "isolated-linux-container"}.`,
           "Installed skill catalog:",
           JSON.stringify(catalog),
         ].join("\n\n"),
@@ -242,7 +284,11 @@ export function scoreWorkspaceSkillRun(
   },
 ): WorkspaceSkillScore {
   const positive = scenario.skillRelevant;
+  const workflowRequired = scenario.workflowRequired ?? positive;
   const processText = input.processCalls.join("\n");
+  const processAlternativePassed = scenario.expectedProcessAlternatives === undefined
+    || scenario.expectedProcessAlternatives.some((alternative) => alternative.every((fragment) => processText.includes(fragment)));
+  const forbiddenProcessAvoided = (scenario.forbiddenProcessFragments ?? []).every((fragment) => !input.processCalls.some((call) => commandContains(call, fragment)));
   const checks = {
     config: configValues(input.finalFiles["config/service.toml"]) === configValues(scenario.expected.config),
     runtime: jsonValue(input.finalFiles["runtime/defaults.json"]) === jsonValue(scenario.expected.runtime),
@@ -250,10 +296,12 @@ export function scoreWorkspaceSkillRun(
     webPreserved: input.finalFiles["web/sentinel.txt"] === SENTINEL,
     generatorPreserved: input.finalFiles["tools/render-config"] === RENDER_SCRIPT,
     verifierPreserved: input.finalFiles["verify-auth"] === VERIFY_SCRIPT,
-    canonicalWrite: positive ? input.fileWrites.includes("config/service.toml") : true,
+    canonicalWrite: workflowRequired ? input.fileWrites.includes("config/service.toml") : true,
     generatedOutputNotWritten: !input.fileWrites.includes("runtime/defaults.json"),
-    generatorRun: positive ? processText.includes("tools/render-config") : input.processCalls.length === 0,
-    scopedVerifierRun: positive ? processText.includes("verify-auth") : input.processCalls.length === 0,
+    generatorRun: workflowRequired ? processText.includes("tools/render-config") : input.processCalls.length === 0,
+    scopedVerifierRun: workflowRequired ? processText.includes("verify-auth") : input.processCalls.length === 0,
+    expectedProcess: processAlternativePassed,
+    forbiddenProcessAvoided,
   };
   const workspacePassed = Object.values(checks).every(Boolean);
   const installed = new Set(input.installedComponentIds);
@@ -279,6 +327,7 @@ export async function runWorkspaceSkillScenario(
   },
 ): Promise<Result<WorkspaceSkillRun, EvolutionError>> {
   const root = await mkdtemp(join(tmpdir(), "omega-workspace-skill-"));
+  const startedAt = Date.now();
   try {
     await materializeWorkspace(root);
     const messages: ModelMessage[] = [...renderWorkspaceSkillPrompt(input.scenario, input.installedSkills.map((skill) => skill.catalog))];
@@ -329,7 +378,7 @@ export async function runWorkspaceSkillScenario(
       const results = [];
       for (const call of calls) {
         toolCalls += 1;
-        results.push(await executeTool(call, root, byId, trace, input.image ?? "omega-runner:local"));
+        results.push(await executeTool(call, root, byId, trace, input.image ?? "omega-runner:local", input.scenario.environment));
       }
       messages.push({ role: "tool", content: results });
     }
@@ -367,6 +416,7 @@ export async function runWorkspaceSkillScenario(
         processCalls: trace.processCalls,
         toolErrors: trace.toolErrors,
         completedNaturally,
+        elapsedMs: Date.now() - startedAt,
         response,
         finalFiles,
         score,
@@ -414,6 +464,7 @@ async function executeTool(
   skills: ReadonlyMap<ComponentId, InstalledTransferSkill>,
   trace: WorkspaceTrace,
   image: string,
+  environment: WorkspaceSkillScenario["environment"],
 ) {
   const error = (message: string) => ({
     kind: "tool-result" as const,
@@ -475,12 +526,32 @@ async function executeTool(
     if (!safeExecutable(executable)) {
       return fail("Executable must be a simple container command or safe workspace-relative executable.");
     }
-    const result = await dockerProcess(root, image, executable, args);
+    const command = [executable, ...args].join(" ");
+    trace.processCalls.push(command);
+    if (environment === "darwin" && isPlainTimeout(executable, args)) {
+      return fail("{\"exitCode\":127,\"stdout\":\"\",\"stderr\":\"zsh: command not found: timeout\"}");
+    }
+    const translated = environment === "darwin" ? translateGtimeout(executable, args) : { executable, args };
+    const result = await dockerProcess(root, image, translated.executable, translated.args);
     if (result.exitCode !== 0) return fail(JSON.stringify(result));
-    trace.processCalls.push([executable, ...args].join(" "));
     return success(result);
   }
   return fail("Unsupported benchmark tool.");
+}
+
+function isPlainTimeout(executable: string, args: readonly string[]): boolean {
+  return executable === "timeout" || (executable === "sh" && args.some((arg) => /(^|[;&|\s])timeout\s/u.test(arg)));
+}
+
+function translateGtimeout(executable: string, args: readonly string[]): { readonly executable: string; readonly args: readonly string[] } {
+  if (executable === "gtimeout") return { executable: "timeout", args };
+  if (executable === "sh") return { executable, args: args.map((arg) => arg.replace(/(^|[;&|\s])gtimeout\s/gu, "$1timeout ")) };
+  return { executable, args };
+}
+
+function commandContains(command: string, fragment: string): boolean {
+  const escaped = fragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(^|\\s)${escaped}(?=$|\\s)`, "u").test(command);
 }
 
 async function dockerProcess(

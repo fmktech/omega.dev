@@ -215,7 +215,7 @@ export type IntegrityError = {
 
 export type ProtocolError = {
   readonly kind: "protocol-error";
-  readonly protocol: "runner-jsonl" | "session-jsonl" | "http" | "sse";
+  readonly protocol: "runner-jsonl" | "session-jsonl" | "http" | "sse" | "codex-app-server";
   readonly message: string;
   readonly recoverable: false;
   readonly callerAction: "abort";
@@ -345,7 +345,7 @@ export type ProviderSelection = OpenRouterSelection | GenericProviderSelection;
 
 export type ProviderConfig = {
   readonly providerId: string;
-  readonly adapter: "openrouter" | "openai-compatible" | "ai-sdk-provider" | "local-openai-compatible";
+  readonly adapter: "openrouter" | "openai-compatible" | "ai-sdk-provider" | "local-openai-compatible" | "codex-app-server";
   readonly baseUrl: string;
   /** Null means this provider requires no credential. */
   readonly credentialEnvName: CredentialEnvName | null;

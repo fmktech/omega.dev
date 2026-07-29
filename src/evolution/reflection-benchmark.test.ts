@@ -56,6 +56,8 @@ describe("reflection component benchmark", () => {
     expect(rendered.value.prompt).toContain("behaviorally portable");
     expect(rendered.value.prompt).toContain("each observable contract");
     expect(rendered.value.prompt).toContain("Never exclude a lesson merely because the same behavior appears in a renamed project");
+    expect(rendered.value.prompt).toContain("tool output from one successful run is observational evidence");
+    expect(rendered.value.prompt).toContain("not permission to rewrite an existing verifier or tool");
     expect(rendered.value.evidenceSha).toMatch(/^[a-f0-9]{64}$/u);
   });
 

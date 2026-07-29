@@ -11,11 +11,14 @@ import type {
   HarnessId,
   HarnessManifest,
   HarnessRepository,
+  ModelRoleRoute,
   ObjectStore,
+  OmegaConfig,
   ProjectId,
   Result,
   SessionId,
   Timestamp,
+  UsdMicros,
 } from "./contracts/index.js";
 import { REFLECTION_SCENARIOS, runReflectionScenarioWithRetries } from "./evolution/reflection-benchmark.js";
 import type { InstalledTransferSkill } from "./evolution/reflection-skill-transfer-benchmark.js";
@@ -30,6 +33,7 @@ import {
   type WorkspaceSkillRun,
 } from "./evolution/workspace-skill-transfer-benchmark.js";
 import { createModelRouter } from "./models/model-router.js";
+import { inspectCodexSubscription } from "./models/codex-app-server-adapter.js";
 import { atomicWriteFile, safeStorageKey } from "./persistence/artifact-store.js";
 import { createFileObjectStore } from "./persistence/object-store.js";
 
@@ -37,10 +41,52 @@ const PROJECT_ID = "project_workspace_skill_transfer_v1" as ProjectId;
 const INCUMBENT_ID = "harness_workspace_skill_transfer_incumbent_v1" as HarnessId;
 const SOURCE_SESSION_ID = "session_workspace_generated_config_correction" as SessionId;
 
+export type WorkspaceCrystallizer = "default" | "codex-subscription";
+
+export function workspaceSkillTransferModelConfig(
+  crystallizer: WorkspaceCrystallizer,
+): OmegaConfig["models"] {
+  if (crystallizer === "default") return DEFAULT_CONFIG.models;
+  const incumbent = DEFAULT_CONFIG.models.routes.find((route) => route.role === "crystallizer");
+  if (incumbent === undefined) throw new Error("Default crystallizer route is missing");
+  const codexRoute: ModelRoleRoute = {
+    ...incumbent,
+    providerId: "openai-codex",
+    modelId: "gpt-5.6-sol",
+    reasoning: { mode: "effort", effort: "high" },
+    selection: { kind: "provider-defined", options: {} },
+    temperature: null,
+    topP: null,
+    seed: null,
+    equivalentListPrice: {
+      inputUsdMicrosPerMillionTokens: 0 as UsdMicros,
+      cachedInputUsdMicrosPerMillionTokens: 0 as UsdMicros,
+      outputUsdMicrosPerMillionTokens: 0 as UsdMicros,
+    },
+  };
+  return {
+    providers: [
+      ...DEFAULT_CONFIG.models.providers,
+      {
+        providerId: "openai-codex",
+        adapter: "codex-app-server",
+        baseUrl: "stdio://codex-app-server",
+        credentialEnvName: null,
+      },
+    ],
+    routes: DEFAULT_CONFIG.models.routes.map((route) => route.role === "crystallizer" ? codexRoute : route),
+  };
+}
+
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
-  const replicates = Number(argv[0] ?? "3");
+  const crystallizer: WorkspaceCrystallizer = argv.includes("--codex")
+    || argv.includes("--crystallizer=codex-subscription")
+    ? "codex-subscription"
+    : "default";
+  const replicateArgument = argv.find((argument) => !argument.startsWith("--"));
+  const replicates = Number(replicateArgument ?? "3");
   if (!Number.isSafeInteger(replicates) || replicates < 1 || replicates > 5) {
-    process.stderr.write("Usage: pnpm benchmark:workspace-skill-transfer [replicates:1-5]\n");
+    process.stderr.write("Usage: pnpm benchmark:workspace-skill-transfer [replicates:1-5] [--codex]\n");
     return 1;
   }
   const sourceScenario = REFLECTION_SCENARIOS.find((scenario) => scenario.id === "generated-config-correction");
@@ -50,8 +96,16 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   }
   const root = resolve(process.env["OMEGA_HOME"] ?? join(homedir(), ".omega")) as AbsolutePath;
   const objects = createFileObjectStore(root);
-  const models = createModelRouter(DEFAULT_CONFIG.models, process.env);
-  process.stderr.write(`workspace-skill-transfer: reflecting with ${modelId("crystallizer")}\n`);
+  const modelConfig = workspaceSkillTransferModelConfig(crystallizer);
+  const crystallizerAuth = crystallizer === "codex-subscription"
+    ? await inspectCodexSubscription()
+    : { ok: true as const, value: { authType: "environment-credential", planType: null } };
+  if (!crystallizerAuth.ok) {
+    process.stderr.write(`${JSON.stringify(crystallizerAuth.error)}\n`);
+    return 3;
+  }
+  const models = createModelRouter(modelConfig, process.env);
+  process.stderr.write(`workspace-skill-transfer: reflecting with ${modelId("crystallizer", modelConfig)} (${crystallizerAuth.value.authType})\n`);
   const reflectedAttempt = await runReflectionScenarioWithRetries(models, sourceScenario, {
     onRetry(retry, nextAttempt, maxAttempts) {
       process.stderr.write(`workspace-skill-transfer: retrying ${retry.reason} reflection (${nextAttempt}/${maxAttempts})\n`);
@@ -147,7 +201,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   const summary = summarizeWorkspaceSkillPairs(pairs, replicates * WORKSPACE_SKILL_SCENARIOS.length);
   const record = {
     kind: "workspace-skill-transfer-benchmark",
-    version: 5,
+    version: 7,
     status: failure === null ? "completed" : "partial",
     methodology: {
       selectionPolicy: "none",
@@ -158,8 +212,13 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
       isolation: "docker --network none; workspace-only bind mount; 512 MiB; 1 CPU",
       verifierVisibility: "hidden deterministic post-run checks",
       modelRoutePolicy: "same configured main-coder route; actual route mismatch invalidates pair",
+      crystallizerIsolation: "Codex is used only for source-session reflection; incumbent and candidate workspace runs retain the unchanged default main-coder route",
+      historicalOutputPolicy: "single-run tool output is observational unless user/spec makes it normative; existing verifiers and tools may not be rewritten to reproduce it",
       efficiencyEffectThresholds: WORKSPACE_EFFICIENCY_THRESHOLDS,
     },
+    crystallizerAuth: crystallizerAuth.value,
+    configuredCrystallizerRoute: modelConfig.routes.find((route) => route.role === "crystallizer"),
+    configuredMainCoderRoute: modelConfig.routes.find((route) => route.role === "main-coder"),
     sourceScenarioId: sourceScenario.id,
     reflectionAttempts,
     reflectionRetries: reflectedAttempt.value.retries,
@@ -310,8 +369,8 @@ async function persistRecord(root: AbsolutePath, signature: string, record: obje
   return path;
 }
 
-function modelId(role: "crystallizer" | "main-coder"): string {
-  const route = DEFAULT_CONFIG.models.routes.find((candidate) => candidate.role === role);
+function modelId(role: "crystallizer" | "main-coder", config: OmegaConfig["models"]): string {
+  const route = config.routes.find((candidate) => candidate.role === role);
   return route === undefined ? "unconfigured" : `${route.providerId}:${route.modelId}`;
 }
 

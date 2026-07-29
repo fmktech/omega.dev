@@ -91,6 +91,8 @@ describe("reflection skill crystallization", () => {
     expect(markdown).toContain("Turn every observable-contract entry into one focused verification case before editing");
     expect(markdown).toContain("Run the focused verifier once after the implementation");
     expect(markdown).toContain("Do not invent behavior outside the ledger");
+    expect(markdown).toContain("Historical tool output is observational evidence");
+    expect(markdown).toContain("Never edit an existing verifier, generator, or tool merely to reproduce a historical message");
   });
 
   it("rejects the kind of lossy skill that omitted the storage app's observable protocol", async () => {

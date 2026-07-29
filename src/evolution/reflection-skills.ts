@@ -204,7 +204,7 @@ function renderSkillMarkdown(input: {
     "",
     "## Observable contract ledger",
     "",
-    "These contracts are authoritative. Preserve direct return values, thrown errors, side effects, and exact wire shapes; do not replace them with a different envelope or convention.",
+    "User- or specification-stated contracts are authoritative. Historical tool output is observational evidence unless the cited evidence explicitly makes its exact text normative. Preserve direct return values, thrown errors, side effects, and exact wire shapes that are established as requirements; do not replace them with a different envelope or convention.",
     "",
     "```json",
     JSON.stringify(observableContracts, null, 2),
@@ -216,7 +216,7 @@ function renderSkillMarkdown(input: {
     "",
     "1. Inspect the repository instructions and current workspace once. Map historical `relevantPaths` cues to files that actually exist; do not keep probing absent paths.",
     "2. Turn every observable-contract entry into one focused verification case before editing. Prefer the repository's existing test framework; otherwise create one temporary verifier that exercises the ledger through public behavior.",
-    "3. Make the smallest coherent implementation that satisfies those cases. Do not invent behavior outside the ledger and current task.",
+    "3. Make the smallest coherent implementation that satisfies those cases. Do not invent behavior outside the ledger and current task. Never edit an existing verifier, generator, or tool merely to reproduce a historical message; run the repository's current executable as-is unless the task explicitly changes it.",
     "4. Run the focused verifier once after the implementation. If it fails, repair only the named failing contracts and rerun it once.",
     "5. Run the repository's required verification once, remove temporary artifacts, audit every ledger row against observed results, and stop. Do not restart open-ended exploration after the audit passes.",
     ...input.lessons.filter((lesson) => lesson.target !== "skill").flatMap((lesson) => [

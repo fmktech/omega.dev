@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_CONFIG } from "../config/defaults.js";
 import type { ComponentId } from "../contracts/index.js";
 import {
   OPERATIONAL_INTERNALIZATION_SCENARIOS,
@@ -9,11 +10,33 @@ import {
   scoreWorkspaceSkillRun,
   workspaceBaselineFiles,
 } from "./workspace-skill-transfer-benchmark.js";
-import { summarizeWorkspaceSkillPairs } from "../workspace-skill-transfer-benchmark-main.js";
+import {
+  summarizeWorkspaceSkillPairs,
+  workspaceSkillTransferModelConfig,
+} from "../workspace-skill-transfer-benchmark-main.js";
 
 const skillId = "component_project_auth" as ComponentId;
 
 describe("workspace skill transfer benchmark", () => {
+  it("changes only the reflection route when Codex subscription evolution is selected", () => {
+    const configured = workspaceSkillTransferModelConfig("codex-subscription");
+    const defaultMain = DEFAULT_CONFIG.models.routes.find((route) => route.role === "main-coder");
+    const configuredMain = configured.routes.find((route) => route.role === "main-coder");
+    const crystallizer = configured.routes.find((route) => route.role === "crystallizer");
+
+    expect(configuredMain).toEqual(defaultMain);
+    expect(crystallizer).toMatchObject({
+      providerId: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      role: "crystallizer",
+    });
+    expect(configured.providers).toContainEqual(expect.objectContaining({
+      providerId: "openai-codex",
+      adapter: "codex-app-server",
+      credentialEnvName: null,
+    }));
+  });
+
   it("keeps verifier checks and expected files outside the model prompt", () => {
     const scenario = WORKSPACE_SKILL_SCENARIOS[0]!;
     const rendered = JSON.stringify(renderWorkspaceSkillPrompt(scenario, [{

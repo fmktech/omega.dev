@@ -14,6 +14,7 @@ import type {
   TokenCount,
 } from "../contracts/index.js";
 import { createOpenRouterAdapter } from "./openrouter-adapter.js";
+import { createCodexAppServerAdapter } from "./codex-app-server-adapter.js";
 import {
   createProviderRegistry,
   type ProviderAdapters,
@@ -257,4 +258,5 @@ export function createModelRouterWithAdapters(
 export const createModelRouter: CreateModelRouter = (config, environment) =>
   createModelRouterWithAdapters(config, environment, {
     openrouter: createOpenRouterAdapter(),
+    "codex-app-server": createCodexAppServerAdapter(),
   });

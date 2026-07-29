@@ -16,7 +16,7 @@ In a synthetic learning benchmark, the evaluation harness temporarily acts as th
 
 - One local daemon shared by the HTML client and `omega` CLI.
 - Project-scoped harness lineages stored in Omega's content-addressed state, not in a project's Git history.
-- Direct OpenRouter and local/provider-adapter routing through AI SDK v7. There is no implicit Vercel AI Gateway or “Omega provider.”
+- Direct OpenRouter and local/provider-adapter routing through AI SDK v7. An opt-in Codex app-server adapter can use an existing ChatGPT subscription for reflection. There is no implicit Vercel AI Gateway or “Omega provider.”
 - Separate model roles: DeepSeek V4 Flash is the current coding/evolution route and GPT-OSS-20B is the cheap automatic execution-policy gate.
 - A model-assisted execution policy with deterministic capability bounds and fail-closed sandbox enforcement.
 - One isolated OCI process per runner or tool, with live stdin/stdout/stderr observation.
@@ -34,6 +34,7 @@ In a synthetic learning benchmark, the evaluation harness temporarily acts as th
 - pnpm 11
 - Docker or Podman for isolated runner/tool execution
 - An `OPENROUTER_API_KEY` for the default route, or a configured local/provider adapter
+- Optional: a locally installed `codex` CLI logged in with ChatGPT for subscription-backed crystallization
 
 The checked-in OpenRouter routes permit provider data collection. Do not send confidential project content through those defaults; select a private provider or local adapter and set the route's data-collection policy accordingly.
 
@@ -77,6 +78,14 @@ Omega daemon ── sessions / policy / evolution / marketplace
 
 Credentials are read from the daemon process environment. Harness manifests declare only credential environment-variable names; secrets are not persisted into manifests, session headers, or marketplace records.
 
+Subscription-managed adapters are the narrow exception: Omega asks the local Codex app-server to verify `account.type = chatgpt`, while Codex owns OAuth login, storage, and refresh. Omega never reads the token or account email. To reproduce the isolated Codex evolution proof:
+
+```sh
+codex login
+pnpm build
+pnpm benchmark:workspace-skill-transfer 3 --codex
+```
+
 The default state directory is under the configured Omega home. It contains content-addressed objects, project and harness indexes, append-only session directories, artifacts, knowledge documents, marketplace records, benchmark evidence, and evolution jobs. Project working trees do not version Omega's harness evolution.
 
 ## Verification
@@ -95,6 +104,7 @@ The second no-selection continual-workstream result is recorded in [`docs/benchm
 The mutation-backed TypeScript test-authoring skill benchmark is recorded in [`docs/benchmarks/2026-07-20-typescript-test-quality.md`](docs/benchmarks/2026-07-20-typescript-test-quality.md).
 The feedback-to-skill transfer benchmark is recorded in [`docs/benchmarks/2026-07-20-feedback-skill-transfer.md`](docs/benchmarks/2026-07-20-feedback-skill-transfer.md).
 The multidimensional operational-internalization benchmark is recorded in [`docs/benchmarks/2026-07-21-operational-internalization.md`](docs/benchmarks/2026-07-21-operational-internalization.md).
+The ChatGPT-subscription Codex evolution proof is recorded in [`docs/benchmarks/2026-07-29-codex-subscription-evolution.md`](docs/benchmarks/2026-07-29-codex-subscription-evolution.md).
 
 ## License
 
